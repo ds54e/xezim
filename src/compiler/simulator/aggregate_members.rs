@@ -4007,7 +4007,7 @@ impl Simulator {
                 return;
             }
         }
-        let ordered: Vec<_> = items
+        let mut ordered: Vec<_> = items
             .unwrap_or(&[])
             .iter()
             .filter_map(|it| match it {
@@ -4015,6 +4015,16 @@ impl Simulator {
                 _ => None,
             })
             .collect();
+        if !super::elaborate::struct_pattern_has_array_member(
+            su,
+            &self.module.typedef_types,
+            &self.module.typedef_unpacked_dims,
+        ) && let Some(expanded) = super::elaborate::struct_pattern_replication(
+            items.unwrap_or(&[]),
+            su.members.iter().map(|m| m.declarators.len()).sum(),
+        ) {
+            ordered = expanded;
+        }
         let mut k = 0usize;
         for m in &su.members {
             for md in &m.declarators {

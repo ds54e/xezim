@@ -355,7 +355,8 @@ fn method_boost_enabled() -> bool {
 // §13.5.1 / §8.25: packed method arguments and results retain specialized widths.
 // §8.8: typed constructors compile the named class scope.
 // §6.21: addressed static locals retain shared storage.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3074;
+// 3075: structure replication in scalarized function calls (§10.9.2).
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3075;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1653,7 +1654,8 @@ struct CombEntryCold {
 // an element of an unpacked array of structs, or of the whole array, now
 // depend on its members too.
 // §10.3.3: keep falling and turn-off delays when prepared tables are restored.
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB032";
+// §10.9.2: scalarized resolver calls expand structure replication.
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB033";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
