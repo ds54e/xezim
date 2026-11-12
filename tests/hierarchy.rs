@@ -474,3 +474,5 @@ mod defparam_targets_core_199;
 mod bind_instance_lists_core_200;
 #[path = "hierarchy/bind_instance_names_core_201.rs"]
 mod bind_instance_names_core_201;
+#[path = "hierarchy/net_alias_groups_1092.rs"]
+mod net_alias_groups_1092;
