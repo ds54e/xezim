@@ -710,3 +710,5 @@ mod struct_pattern_keys_continuous_assign;
 mod ansi_port_inheritance_1078;
 #[path = "types/packed_struct_array_local_fill_1082.rs"]
 mod packed_struct_array_local_fill_1082;
+#[path = "types/constant_expression_context_1096.rs"]
+mod constant_expression_context_1096;
