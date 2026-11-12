@@ -630,3 +630,5 @@ mod cli_worker_stack_1055;
 
 #[path = "misc/prepared_cache_driven_init.rs"]
 mod prepared_cache_driven_init;
+#[path = "misc/interconnect_array_drivers_1098.rs"]
+mod interconnect_array_drivers_1098;
