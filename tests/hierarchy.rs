@@ -476,3 +476,6 @@ mod bind_instance_lists_core_200;
 mod bind_instance_names_core_201;
 #[path = "hierarchy/instance_struct_members_root_1046.rs"]
 mod instance_struct_members_root_1046;
+
+#[path = "hierarchy/defparam_own_instance.rs"]
+mod defparam_own_instance;
