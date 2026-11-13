@@ -1680,7 +1680,8 @@ struct CombEntryCold {
 // §10.3.3 / §28.16: retain each delayed entry's original transition target.
 // §10.3.3 / §28.16: and the fall and turn-off delays of a select target.
 // §7.4.1: compiled members of ascending packed arrays of structs slice from slot 0.
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB035";
+// §7.6 / §10.9.1: slice patterns expand into individual element drivers.
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB036";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).

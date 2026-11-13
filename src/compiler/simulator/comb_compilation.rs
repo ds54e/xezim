@@ -503,6 +503,8 @@ impl Simulator {
                     Some(&descending_snapshot),
                     Some(&decl_dims_snapshot),
                     Some(&params_snapshot),
+                    Some(&arrays_2d_snapshot),
+                    ca.delay_fall.is_none() && ca.delay_off.is_none() && ca.gate_delay_fall.is_none(),
                 )
                 .or_else(|| {
                     crate::compiler::elaborate::whole_array_row_assign_parts(
@@ -5119,6 +5121,8 @@ impl Simulator {
             None,
             Some(&row_dims),
             Some(params),
+            None,
+            true,
         )?;
         Some(
             parts
