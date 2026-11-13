@@ -20,7 +20,7 @@ impl Simulator {
                     NumberBase::Hex => 16,
                     NumberBase::Decimal => 10,
                 };
-                // §5.7.1: an UNSIZED literal is at least 32 bits, but must not
+                // §5.7.1: an UNSIZED based literal is at least 32 bits, but must not
                 // drop digits the source wrote — `'h123456789ABCDEF0` is 64 bits
                 // of value and a flat 32 kept only the low half, silently.
                 // The cached triple already carries the width the literal
@@ -29,6 +29,10 @@ impl Simulator {
                 let cached = cached_val.get();
                 let w = match size {
                     Some(sz) => *sz,
+                    // Match upstream's deliberate wrap for signed decimals
+                    // (plain and 'sd), rather than §5.7.1's minimum-width
+                    // rule. Unsigned 'd keeps its digits as on main.
+                    None if *signed && matches!(base, NumberBase::Decimal) => 32,
                     None => match cached {
                         Some((_, _, cw)) => cw,
                         None => Value::unsized_literal_width(value, r_for_w),

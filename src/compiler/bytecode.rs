@@ -21179,9 +21179,12 @@ impl<'a> BytecodeCompiler<'a> {
                 value,
                 cached_val,
             } => {
-                // §5.7.1 — see `Value::unsized_literal_width`.
+                // Keep upstream's deliberate 32-bit wrap for signed decimals
+                // (plain and 'sd); unsigned 'd keeps its digits. This follows
+                // upstream policy rather than §5.7.1's minimum-width rule.
                 let w = match size {
                     Some(sz) => *sz,
+                    None if *signed && matches!(base, NumberBase::Decimal) => 32,
                     None => Value::unsized_literal_width(
                         value,
                         match base {
