@@ -2395,6 +2395,8 @@ impl Simulator {
         {
             return 1;
         }
+        let literal = super::bytecode::unsized_decimal_delay_value(d);
+        let v = literal.as_ref().unwrap_or(v);
         let raw = if v.is_real {
             let f = v.to_f64();
             // Diagnose a pathological real delay: non-finite (NaN/inf) or

@@ -271,7 +271,8 @@ impl Simulator {
             let saved = slf.timescale_scope_override.replace(scope);
             let (unit_exp, _) = slf.current_timescale_exp();
             slf.timescale_scope_override = saved;
-            let v = slf.eval_expr(e);
+            let v =
+                super::bytecode::unsized_decimal_delay_value(e).unwrap_or_else(|| slf.eval_expr(e));
             let f = if v.is_real {
                 v.to_f64()
             } else {

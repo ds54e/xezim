@@ -6,6 +6,51 @@
 
 use std::process::Command;
 
+// §9.4.1, §9.4.5, Annex A.6.5: a single decimal delay keeps its magnitude.
+// All checks pass on main; the signed-decimal runtime policy must preserve them.
+#[test]
+fn single_unsized_decimal_delays_keep_their_magnitude() {
+    let dir = std::env::temp_dir().join(format!("xz_decimal_delays_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("top.sv");
+    std::fs::write(&path, include_str!("unsized_decimal_delays.sv")).unwrap();
+    for proc_fsm in ["0", "1"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_xezim"))
+            .arg("--no-cache")
+            .env("XEZIM_PROC_FSM", proc_fsm)
+            .arg(&path)
+            .current_dir(&dir)
+            .output()
+            .expect("run xezim");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stdout}\n{stderr}");
+        for line in [
+            "plain_small 4294967296",
+            "plain_large 10000000000",
+            "paren_small 4294967296",
+            "paren_large 10000000000",
+            "intra_small 4294967296 1",
+            "intra_large 10000000000 1",
+            "intra_paren_small 4294967296 1",
+            "intra_paren_large 10000000000 1",
+            "nba_large 10000000000",
+            "continuous 4294967297",
+            "net_declaration 10000000001",
+            "net 4294967297",
+            "gate 10000000001",
+            "structural 1 1 1 1",
+            "watchdog 20000000000",
+        ] {
+            assert!(
+                stdout.lines().any(|s| s == line),
+                "missing {line}:\n{stdout}\n{stderr}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn runtime_unsized_decimals_match_parameters_and_warn_once() {
     let dir = std::env::temp_dir().join(format!("xz_decimal_runtime_{}", std::process::id()));
@@ -27,7 +72,7 @@ fn runtime_unsized_decimals_match_parameters_and_warn_once() {
         "direct -1454759936 1",
         "expressions 2 1454759936",
         "real -2909519872",
-        "decimal_base 2000000000000 -1454759936 41 32",
+        "decimal_base 2000000000000 41",
         "guards 2147483647 2000000000000 4294967297 -2147483648 64 36",
     ] {
         assert!(

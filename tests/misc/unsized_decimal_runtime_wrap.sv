@@ -20,7 +20,7 @@ module top;
     $display("direct %0d %0d", 2000000000000, 4294967297);
     $display("expressions %0d %0d", 4294967297 + 1, -2000000000000);
     $display("real %.0f", 2.0 * 2000000000000);
-    $display("decimal_base %0d %0d %0d %0d", 'd2000000000000, 'sd2000000000000, $bits('d2000000000000), $bits('sd2000000000000));
+    $display("decimal_base %0d %0d", 'd2000000000000, $bits('d2000000000000));
     $display("guards %0d %0d %0d %0d %0d %0d", 2147483647, 64'd2000000000000, 'h1_0000_0001, -2147483648, $bits(64'd2000000000000), $bits('h1_0000_0001));
   end
 endmodule

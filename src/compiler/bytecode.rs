@@ -18,6 +18,57 @@ pub type UnpackedStructLeaves = HashMap<usize, Vec<(String, String)>>;
 
 const MAX_INLINE_DEPTH: usize = 8;
 
+/// Keep main's value for a single decimal delay (§9.4.1, Annex A.6.5:
+/// `delay_value ::= unsigned_number | ...`), including `#(N)`.
+/// Other expressions still use the signed-decimal runtime policy (§5.7.1).
+pub(super) fn unsized_decimal_delay_value(d: &Expression) -> Option<Value> {
+    let mut literal = d;
+    let mut scale = None;
+    // `rewrite_delay_expr` in core wraps a scaled delay in a multiplication
+    // whose parent and BOTH operands have the original delay's exact span.
+    // A source multiplication has distinct operand spans; do not admit it.
+    if let ExprKind::Binary {
+        op: BinaryOp::Mul,
+        left,
+        right,
+    } = &d.kind
+        && d.span == left.span
+        && d.span == right.span
+        && let ExprKind::Number(NumberLiteral::Real(f)) = &right.kind
+    {
+        literal = left;
+        scale = Some(*f);
+    }
+    while let ExprKind::Paren(inner) = &literal.kind {
+        literal = inner;
+    }
+    let ExprKind::Number(NumberLiteral::Integer {
+        size: None,
+        signed: true,
+        base: NumberBase::Decimal,
+        value,
+        ..
+    }) = &literal.kind
+    else {
+        return None;
+    };
+    if !value.bytes().all(|c| c.is_ascii_digit() || c == b'_') {
+        return None;
+    }
+    let width = Value::unsized_literal_width(value, 10);
+    if width <= 32 {
+        return None;
+    }
+    crate::compiler::elaborate::warn_unsized_decimal_wrap(None, &NumberBase::Decimal, value);
+    let mut v = Value::from_str_radix(value, 10, width);
+    v.is_signed = true;
+    // Preserve main's existing signed conversion when core scaled a delay.
+    Some(match scale {
+        Some(f) => Value::from_f64(v.to_f64() * f),
+        None => v,
+    })
+}
+
 /// Sentinel for a method receiver whose declared class could not be resolved
 /// (a handle local/formal with no carried declared type). `emit_arg_slot_writeback`
 /// treats UNTYPED receivers with the conservative name-global writeback rule.
@@ -13244,8 +13295,15 @@ impl<'a> BytecodeCompiler<'a> {
                         {
                             return false;
                         }
-                        let Some(r) = self.compile_expr(d, 0) else {
-                            return false;
+                        let r = if let Some(v) = unsized_decimal_delay_value(d) {
+                            let r = self.alloc_reg();
+                            self.emit(Insn::LoadConst(r, Box::new(v)));
+                            r
+                        } else {
+                            let Some(r) = self.compile_expr(d, 0) else {
+                                return false;
+                            };
+                            r
                         };
                         self.emit(Insn::WaitDelayReg(r));
                     }
