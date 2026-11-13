@@ -102,3 +102,6 @@ mod shared_net_driver_stages;
 mod vector_continuous_delay;
 #[path = "gates/review_select_continuous_delay.rs"]
 mod review_select_continuous_delay;
+
+#[path = "gates/delayed_logic_z.rs"]
+mod delayed_logic_z;
