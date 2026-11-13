@@ -998,7 +998,8 @@ impl Simulator {
         }
         // `return`/`break`/`continue` are frame-local — restore the caller's
         // flags so the function body can't terminate the caller's loop/block.
-        self.break_flag = saved_break;
+        // §9.7: self-kill unwinds through the caller as well.
+        self.break_flag = saved_break || self.disable_target.as_deref() == Some("");
         self.continue_flag = saved_continue;
         self.return_flag = saved_return;
         self.pop_and_restore_queue_frame();
@@ -1221,7 +1222,9 @@ impl Simulator {
                 .iter()
                 .map(|(p, c, out)| (p.as_str(), c.as_str(), *out)),
         );
-        self.break_flag = c.saved_break || self.dpi_unwinding;
+        // §9.7: a self-kill ends the process, not just this task frame.
+        self.break_flag =
+            c.saved_break || self.dpi_unwinding || self.disable_target.as_deref() == Some("");
         self.return_flag = c.saved_return || self.dpi_unwinding;
         self.pop_and_restore_queue_frame();
         // The caller's shadowed storage is restored above — now apply the

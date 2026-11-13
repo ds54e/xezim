@@ -56,7 +56,7 @@ impl Simulator {
                 if !self.killed_pids.contains(&pid) && self.cont_has_named_block(pc, &x) {
                     let kids = self.children_forked_in(pid, &x);
                     for k in kids {
-                        self.proc_kill(k);
+                        self.proc_kill(k, false);
                     }
                 } else if !self.killed_pids.contains(&pid) && self.is_process_top_label(pid, &x) {
                     // The process's top-level block holds everything it forked.
@@ -68,7 +68,7 @@ impl Simulator {
                         .collect();
                     kids.sort_unstable();
                     for k in kids {
-                        self.proc_kill(k);
+                        self.proc_kill(k, false);
                     }
                 }
             } else {
@@ -421,7 +421,7 @@ impl Simulator {
             return;
         };
         for k in kids {
-            self.proc_kill(k);
+            self.proc_kill(k, false);
         }
         self.pending_block_disable.insert(a, x.to_string());
         self.event_queue.schedule(self.time, a, cont);

@@ -3322,7 +3322,7 @@ impl Simulator {
                     return Value::from_u64(self.proc_status(pid) as u64, 32);
                 }
                 "kill" => {
-                    self.proc_kill(pid);
+                    self.proc_kill(pid, true);
                     return Value::zero(32);
                 }
                 "await" => {

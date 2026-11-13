@@ -4789,7 +4789,7 @@ impl Simulator {
             CUR_METHOD_COMPILED.store(prev, std::sync::atomic::Ordering::Relaxed);
         }
         self.m_scope_stack = saved_m_scope;
-        self.break_flag = saved_break;
+        self.break_flag = saved_break || self.disable_target.as_deref() == Some("");
         self.continue_flag = saved_continue;
         self.return_flag = saved_return;
         self.method_local_base.pop();

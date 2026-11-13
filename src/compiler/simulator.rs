@@ -9927,6 +9927,9 @@ pub struct Simulator {
     /// While this is non-zero, procedural comb entries triggered mid-process
     /// are parked in `deferred_comb` and run at the process's exit instead.
     proc_depth: u32,
+    /// §9.7: owner of the live scheduled frame, independent of the last PID
+    /// serviced by a nested event loop. Restored on scheduled dispatch exit.
+    scheduled_pid: Option<usize>,
     /// (comb entry index, outputs it produced) for procedural entries that ran
     /// while a process was mid-flight. Checked for clobbering at process exit.
     deferred_comb: Vec<(usize, Vec<(usize, Value)>)>,

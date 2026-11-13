@@ -3102,7 +3102,11 @@ impl Simulator {
                 | Insn::RetCollection(..)
                 | Insn::AssignPendingColl(..) => {
                     local_count += self.exec_class_opcode(&insns[pc]);
-                    if self.finished {
+                    // §9.7: a call can kill the executing process; propagate
+                    // the empty-target unwind just like an AST fallback.
+                    if self.finished
+                        || (self.break_flag && self.disable_target.as_deref() == Some(""))
+                    {
                         break;
                     }
                 }
@@ -4085,7 +4089,9 @@ impl Simulator {
                         .entry(reason)
                         .or_insert((0u64, 0u64));
                     ent.0 += 1;
-                    if self.finished {
+                    if self.finished
+                        || (self.break_flag && self.disable_target.as_deref() == Some(""))
+                    {
                         break;
                     }
                 }
@@ -4107,7 +4113,9 @@ impl Simulator {
                     e.0 += 1;
                     e.1 += elapsed;
                     // §20.2: an AST system task can terminate this stream.
-                    if self.finished {
+                    if self.finished
+                        || (self.break_flag && self.disable_target.as_deref() == Some(""))
+                    {
                         break;
                     }
                 }

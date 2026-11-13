@@ -1002,9 +1002,13 @@ impl Simulator {
         // §9.2 rescan (see waiter_cont_anyedge_wake). Only the edge-BLOCK
         // flag is cleared here.
         let saved_in_edge_block = std::mem::replace(&mut self.in_edge_block, false);
+        let saved_scheduled_pid = self.scheduled_pid.replace(pid);
+        let caller = saved_scheduled_pid.filter(|_| !saved_in_edge_block);
 
         self.proc_depth += 1;
-        self.run_scheduled_process_inner(pid, stmts);
+        self.run_scheduled_process_inner(pid, stmts, caller);
+        self.clear_self_kill_unwind(caller);
+        self.scheduled_pid = saved_scheduled_pid;
         self.proc_depth -= 1;
         self.in_edge_block = saved_in_edge_block;
         if self.proc_depth == 0 {
@@ -1021,7 +1025,18 @@ impl Simulator {
         }
     }
 
-    pub(super) fn run_scheduled_process_inner(&mut self, pid: usize, stmts: &ProcCont) {
+    // §9.7: the unwind belongs to the killed activation. Keep it only when
+    // inline dispatch returns to a caller killed by that activation as well.
+    fn clear_self_kill_unwind(&mut self, caller: Option<usize>) {
+        if self.disable_target.as_deref() == Some("")
+            && !caller.is_some_and(|pid| self.killed_pids.contains(&pid))
+        {
+            self.disable_target = None;
+            self.break_flag = false;
+        }
+    }
+
+    fn run_scheduled_process_inner(&mut self, pid: usize, stmts: &ProcCont, caller: Option<usize>) {
         // Flags from a prior process must not leak into this one.
         self.break_flag = false;
         self.return_flag = false;
@@ -1085,6 +1100,7 @@ impl Simulator {
         if stmts.is_empty() && self.fast_delay_always.contains_key(&pid) {
             let saved = self.take_process_context();
             self.run_fast_delay_always(pid);
+            self.clear_self_kill_unwind(caller);
             self.restore_process_context(saved);
             self.auto_loop_vars.truncate(saved_auto_len);
             let mine = self.name_resolve_hint.replace(saved_hint);
@@ -1099,12 +1115,14 @@ impl Simulator {
             // time for nothing. Reset only if the run left something behind.
             if self.process_context_is_default() {
                 self.run_proc_fsm(pid);
+                self.clear_self_kill_unwind(caller);
                 if !self.process_context_is_default() {
                     self.restore_process_context(ProcessContext::default());
                 }
             } else {
                 let saved = self.take_process_context();
                 self.run_proc_fsm(pid);
+                self.clear_self_kill_unwind(caller);
                 self.restore_process_context(saved);
             }
             self.auto_loop_vars.truncate(saved_auto_len);

@@ -312,6 +312,12 @@ impl Simulator {
             let was_finished = self.finished;
             self.finished = false;
             for fb in finals {
+                // §9.2.3: every final procedure starts independently of the
+                // execution control state left by the terminating process.
+                self.disable_target = None;
+                self.break_flag = false;
+                self.return_flag = false;
+                self.continue_flag = false;
                 let span = fb.stmt.span;
                 let stmts = match fb.stmt.kind {
                     StatementKind::SeqBlock { stmts, .. } => stmts,

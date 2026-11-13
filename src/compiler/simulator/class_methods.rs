@@ -2673,10 +2673,9 @@ impl Simulator {
                     *self.activation_scope.borrow_mut() = prev;
                 }
                 let vif_alias_ended = self.local_iface_aliases.pop().unwrap_or_default();
-                if self.parked_from_exec {
-                    // The process was parked by exec_statement's Wait handler.
-                    // Keep break/return flags set so they propagate up to
-                    // run_process_stmts. Don't restore the saved values.
+                if self.parked_from_exec || self.disable_target.as_deref() == Some("") {
+                    // The process was parked by Wait, or killed itself (§9.7).
+                    // Keep the unwind flags through the caller's frames.
                 } else {
                     self.break_flag = saved_break;
                     self.continue_flag = saved_continue;

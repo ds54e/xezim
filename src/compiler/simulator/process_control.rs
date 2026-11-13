@@ -174,8 +174,9 @@ impl Simulator {
 
     /// §9.7 `kill()`: forcibly terminate the process and all its descendant
     /// subprocesses. All such processes shall be terminated before kill()
-    /// returns.
-    pub(super) fn proc_kill(&mut self, pid: usize) {
+    /// returns. Only process-handle calls request a live self-kill unwind;
+    /// internal disable/program cleanup keeps its existing unwind path.
+    pub(super) fn proc_kill(&mut self, pid: usize, unwind_current: bool) {
         // Collect the process + all descendants.
         let mut to_kill: HashSet<usize> = HashSet::default();
         to_kill.insert(pid);
@@ -225,6 +226,13 @@ impl Simulator {
         self.release_killed_from_join_waiters(&to_kill);
         // Wake any process that was awaiting the killed process.
         self.wake_await_waiters(&to_kill);
+        if unwind_current && !self.in_edge_block && to_kill.contains(&self.current_pid) {
+            // §9.7: killing the executing process must also unwind its live
+            // statement stream. Reuse the killed-process disable unwind;
+            // an empty target cannot be consumed by a named block or task.
+            self.disable_target = Some(String::new());
+            self.break_flag = true;
+        }
     }
 
     /// §9.7 `await()`: block the calling process until the target process
@@ -530,7 +538,7 @@ impl Simulator {
                 for p in rest {
                     self.program_pid_scope.remove(&p);
                     self.program_pids.remove(&p);
-                    self.proc_kill(p);
+                    self.proc_kill(p, false);
                 }
             }
         }
