@@ -205,6 +205,8 @@ mod preprocessor_github_issues;
 mod procedural_loop_stall;
 #[path = "scheduling/process_block_local_shadowing.rs"]
 mod process_block_local_shadowing;
+#[path = "scheduling/process_self_kill.rs"]
+mod process_self_kill;
 #[path = "scheduling/pure_inline_loop_body.rs"]
 mod pure_inline_loop_body;
 #[path = "scheduling/randcase_blocking_branch.rs"]
