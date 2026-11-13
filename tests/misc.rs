@@ -291,6 +291,8 @@ mod system_task_value;
 mod time0_x_defaults;
 #[path = "misc/unnamed_block_end_label.rs"]
 mod unnamed_block_end_label;
+#[path = "misc/unsized_decimal_runtime_wrap.rs"]
+mod unsized_decimal_runtime_wrap;
 #[path = "misc/unsized_decimal_wrap_warning.rs"]
 mod unsized_decimal_wrap_warning;
 #[path = "misc/uvm_agent_active_config.rs"]
