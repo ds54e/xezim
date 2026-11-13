@@ -3444,6 +3444,23 @@ impl Simulator {
                 }
                 out
             }
+            // IEEE 1800-2023 §28.4/§28.5: delayed identity gates must
+            // convert z to x, like the undelayed primitive-buffer path.
+            // Keep real inputs on the existing assignment conversion path
+            // (§6.12.1); bitwise XOR would reinterpret their stored bits.
+            "$__logic_buf" => {
+                let mut v = args
+                    .first()
+                    .map(|a| self.eval_expr_ctx(a, ctx_width))
+                    .unwrap_or_else(|| Value::new(1));
+                if !v.is_real && v.has_xz() {
+                    let (signed, fill) = (v.is_signed, v.is_fill);
+                    v = v.bitwise_xor(&Value::zero(v.width));
+                    v.is_signed = signed;
+                    v.is_fill = fill;
+                }
+                v
+            }
             "$__pull" | "$__supply" | "$__weak" | "$__drive" => args
                 .first()
                 .map(|a| self.eval_expr(a))

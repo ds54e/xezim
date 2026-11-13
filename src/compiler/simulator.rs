@@ -1138,6 +1138,8 @@ enum CombItem {
         // enum so direct-copy/fused/compiled entries stay cache compact.
         lhs: Box<Expression>,
         rhs: Box<Expression>,
+        /// §28.4/§28.5: apply the logic-gate truth table before scheduling.
+        logic_buf: bool,
         delay: u64,
         /// §10.3.3 / §28.16: the original target before driver widening,
         /// boxed like the ASTs so the entry stays cache compact.
@@ -1680,7 +1682,8 @@ struct CombEntryCold {
 // §10.3.3 / §28.16: retain each delayed entry's original transition target.
 // §10.3.3 / §28.16: and the fall and turn-off delays of a select target.
 // §7.4.1: compiled members of ascending packed arrays of structs slice from slot 0.
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB035";
+// §28.4/§28.5: delayed identity gates retain a z-to-x conversion flag.
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB036";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).

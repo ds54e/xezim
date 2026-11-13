@@ -606,6 +606,7 @@ impl Simulator {
             CombItem::ContAssign {
                 lhs,
                 rhs,
+                logic_buf,
                 delay: explicit_delay,
                 delay_target,
             } => {
@@ -665,10 +666,23 @@ impl Simulator {
                 }
                 let w = self.infer_lhs_width(lhs);
                 // §10.8, §10.9: a pattern takes the net's declared type.
-                let val = match self.eval_pattern_for_lvalue(lhs, rhs) {
+                let mut val = match self.eval_pattern_for_lvalue(lhs, rhs) {
                     Some(v) => v.resize(w),
                     None => self.eval_expr_ctx(rhs, w).resize(w),
                 };
+                // §28.4/§28.5: gate z inputs drive x. Binary values take
+                // the ordinary assignment path; real inputs retain the
+                // existing target conversion (§6.12.1).
+                if *logic_buf && !val.is_real {
+                    if let Some((bits, xz)) = val.inline_bits() {
+                        val.set_inline_bits(bits & !xz, xz);
+                    } else if val.has_xz() {
+                        let (signed, fill) = (val.is_signed, val.is_fill);
+                        val = val.bitwise_xor(&Value::zero(val.width));
+                        val.is_signed = signed;
+                        val.is_fill = fill;
+                    }
+                }
                 let delay = if *explicit_delay > 0 {
                     *explicit_delay
                 } else {

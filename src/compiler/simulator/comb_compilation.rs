@@ -984,8 +984,25 @@ impl Simulator {
             } else {
                 None
             };
+            // §28.4/§28.5: consume the elaborator's marker once, leaving
+            // ordinary RHS evaluation on the delayed entry's existing path.
+            let logic_buf_input = match &ca.rhs.kind {
+                ExprKind::SystemCall { name, args } if name == "$__logic_buf" => args.first(),
+                _ => None,
+            };
             let fused = if !has_transition_delay && cov_counter.is_none() {
-                self.try_build_fused_gate(&ca.lhs, &ca.rhs, scope_hint.as_deref())
+                // §28.5: the existing scalar primitive-buffer fast path
+                // already maps z to x. Retain it when delays resolve to zero.
+                let rhs = if lhs_is_bare_ident
+                    && wids.len() == 1
+                    && self.signal_widths[wids[0]] == 1
+                    && self.signal_gate_driven[wids[0]]
+                {
+                    logic_buf_input.unwrap_or(&ca.rhs)
+                } else {
+                    &ca.rhs
+                };
+                self.try_build_fused_gate(&ca.lhs, rhs, scope_hint.as_deref())
             } else {
                 None
             };
@@ -1014,10 +1031,14 @@ impl Simulator {
                 && Self::const_elem_ref(&ca.rhs, &self.module)
                     .and_then(|(base, idx)| self.elem_cell(&base, &idx))
                     .is_some_and(is_packed_id);
-            let item = if has_transition_delay || packed_array_copy {
+            let item = if has_transition_delay
+                || packed_array_copy
+                || (logic_buf_input.is_some() && fused.is_none())
+            {
                 CombItem::ContAssign {
                     lhs: Box::new(ca.lhs.clone()),
-                    rhs: Box::new(ca.rhs.clone()),
+                    rhs: Box::new(logic_buf_input.unwrap_or(&ca.rhs).clone()),
+                    logic_buf: logic_buf_input.is_some(),
                     delay: explicit_delay,
                     delay_target: delay_target.map(Box::new),
                 }
@@ -1116,6 +1137,7 @@ impl Simulator {
                         CombItem::ContAssign {
                             lhs: Box::new(ca.lhs),
                             rhs: Box::new(ca.rhs),
+                            logic_buf: false,
                             delay: 0,
                             delay_target: None,
                         }
@@ -1207,6 +1229,7 @@ impl Simulator {
                         CombItem::ContAssign {
                             lhs: Box::new(ca.lhs),
                             rhs: Box::new(ca.rhs),
+                            logic_buf: false,
                             delay: 0,
                             delay_target: None,
                         }
@@ -1216,6 +1239,7 @@ impl Simulator {
                 CombItem::ContAssign {
                     lhs: Box::new(ca.lhs),
                     rhs: Box::new(ca.rhs),
+                    logic_buf: false,
                     delay: 0,
                     delay_target: None,
                 }

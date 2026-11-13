@@ -29,7 +29,8 @@ use serde::ser::{SerializeSeq, Serializer};
 /// state field's type.
 // §10.3.3 / §28.16: CombItem::ContAssign retains its original delay target.
 // §10.3.3 / §28.16: and the fall and turn-off delays of a select target.
-const MAGIC: &[u8; 8] = b"XZCKPT\x00\x08";
+// §28.4/§28.5: CombItem::ContAssign retains its logic-buffer conversion.
+const MAGIC: &[u8; 8] = b"XZCKPT\x00\x09";
 
 #[derive(Default)]
 struct Session {
