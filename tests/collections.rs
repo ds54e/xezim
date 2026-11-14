@@ -369,3 +369,6 @@ mod review_queue_of_queues_push_1086;
 
 #[path = "collections/assoc_struct_delete_1124.rs"]
 mod assoc_struct_delete_1124;
+
+#[path = "collections/package_array_storage.rs"]
+mod package_array_storage;

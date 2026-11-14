@@ -159,3 +159,6 @@ mod format_unknown_spec_no_eval;
 
 #[path = "strings/p_format_aggregates_566.rs"]
 mod p_format_aggregates_566;
+
+#[path = "strings/package_array_vpi.rs"]
+mod package_array_vpi;
