@@ -582,6 +582,15 @@ impl Simulator {
         for k in keys {
             if let Some(sig) = module.pkg_var_decls.get(&k).cloned() {
                 let (_, base) = k.split_once("::").unwrap();
+                // §26.3/§7.4: rewritten array references name their element
+                // storage directly. Do not give an array a scalar anchor:
+                // it changes select dispatch and hides signed-label writes.
+                if module.arrays.contains_key(&k)
+                    || module.arrays_2d.contains_key(&k)
+                    || module.arrays_nd.contains_key(&k)
+                {
+                    continue;
+                }
                 if let Some(ty) = module.var_decl_types.get(base).cloned() {
                     module.var_decl_types.entry(k.clone()).or_insert(ty);
                 }

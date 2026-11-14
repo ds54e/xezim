@@ -5665,9 +5665,20 @@ impl Simulator {
                         if let Some((shape, w)) = self.module.arrays_nd.get(&*base_name).cloned() {
                             if rev_idxs.len() == shape.len() {
                                 let mut name = base_name.clone();
+                                let package_labels =
+                                    self.module.pkg_var_decls.contains_key(base_name.as_ref());
                                 for i in (0..rev_idxs.len()).rev() {
-                                    let v =
-                                        self.eval_expr(rev_idxs[i]).to_u64().unwrap_or(0) as i64;
+                                    let value = self.eval_expr(rev_idxs[i]);
+                                    // §7.4.2/§26.3: a resolved package array
+                                    // keeps signed labels, just as the 2-D path.
+                                    let v = if package_labels {
+                                        let Some(v) = value.to_index() else {
+                                            return Value::new(w);
+                                        };
+                                        v
+                                    } else {
+                                        value.to_u64().unwrap_or(0) as i64
+                                    };
                                     name = std::borrow::Cow::Owned(format!("{}[{}]", name, v));
                                 }
                                 if let Some(&eid) = self.signal_name_to_id.get(name.as_ref()) {

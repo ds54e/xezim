@@ -23,7 +23,8 @@
 //!   built for, and the VPI entry points in `simulator.rs` consult it through
 //!   the hooks at the bottom of this file.
 //!
-//! A design loaded from a compiled artifact has no sources, hence no model:
+//! A compiled artifact normally uses the legacy fallback. Split package-array
+//! anchors can reconstruct their scopes without sources; otherwise there is no model:
 //! the entry points then keep their flat signal-table behavior.
 //!
 //! Handles. Instances (modules, interfaces, programs) are `VpiKind::Module`
@@ -738,7 +739,7 @@ thread_local! {
 }
 
 /// Run `f` on the model of `sim`, building it first if needed. `None` when
-/// the design has no sources to build it from.
+/// the design has neither sources nor split package-array anchors.
 ///
 /// Re-entrant use (a `$systf` evaluated while the model is borrowed) finds
 /// the model busy and gets `None`, like a design without sources.
@@ -1162,7 +1163,19 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn build(sim: &Simulator) -> Option<Box<VpiModel>> {
         let texts = &sim.module.source_texts;
-        if texts.is_empty() {
+        // §26.3/§37: artifacts with split package arrays retain enough
+        // metadata to build their package scopes through `flat_members`.
+        if texts.is_empty()
+            && !sim
+                .module
+                .pkg_var_decls
+                .keys()
+                .any(|q| {
+                    sim.module.arrays.contains_key(q)
+                        || sim.module.arrays_2d.contains_key(q)
+                        || sim.module.arrays_nd.contains_key(q)
+                })
+        {
             return None;
         }
         // The same lexer and parser the compile ran, on the same text: the
@@ -1711,9 +1724,7 @@ impl<'a> Builder<'a> {
         s
     }
 
-    fn package_scope(&mut self, p: &'a PackageDeclaration, fi: u32) {
-        let (file, line) = self.loc(p.span, fi);
-        let name = p.name.name.clone();
+    fn package_scope_header(&mut self, name: String, file: u32, line: u32, automatic: bool) -> u32 {
         let s = self.m.add_scope(MScope {
             kind: SKind::Package,
             type_code: c::PACKAGE,
@@ -1731,7 +1742,7 @@ impl<'a> Builder<'a> {
             gen_array: NONE,
             index: 0,
             implicit: false,
-            automatic: p.lifetime == Some(Lifetime::Automatic),
+            automatic,
             cell: false,
             top: false,
             join: 0,
@@ -1744,6 +1755,18 @@ impl<'a> Builder<'a> {
         self.m.packages.push(s);
         // `vpi_handle_by_name("pkg", NULL)` as well as `"pkg::"`.
         self.m.by_name.entry(name.clone()).or_insert(MRef::Scope(s));
+        s
+    }
+
+    fn package_scope(&mut self, p: &'a PackageDeclaration, fi: u32) {
+        let (file, line) = self.loc(p.span, fi);
+        let name = p.name.name.clone();
+        let s = self.package_scope_header(
+            name.clone(),
+            file,
+            line,
+            p.lifetime == Some(Lifetime::Automatic),
+        );
         let ctx = Ctx {
             scope: s,
             file: fi,
@@ -1772,14 +1795,53 @@ impl<'a> Builder<'a> {
         let sim = self.sim;
         let scope_path = prefix.trim_end_matches('.');
         let full = self.m.scopes[s as usize].full.clone();
+        let ctx = Ctx {
+            scope: s,
+            file: NONE,
+            flat_prefix: prefix.to_string(),
+            flat_suffix: String::new(),
+            inst_prefix: prefix.to_string(),
+            params: self.params_for(prefix),
+            automatic: false,
+            body_params_local: false,
+        };
         let mut names: Vec<(String, usize)> = vpi_scope_members(sim, scope_path);
+        if scope_path.is_empty() {
+            names.extend(sim.module.pkg_var_decls.keys().filter_map(|q| {
+                (sim.module.arrays_2d.contains_key(q) || sim.module.arrays_nd.contains_key(q))
+                    .then(|| (q.clone(), usize::MAX))
+            }));
+        }
         names.sort();
         for (flat, id) in names {
-            let leaf = flat.rsplit('.').next().unwrap_or(&flat).to_string();
+            // §37: serialized package anchors reconstruct their owning scope.
+            let package = sim
+                .module
+                .pkg_var_decls
+                .contains_key(&flat)
+                .then(|| flat.split_once("::"))
+                .flatten();
+            let (s, full, leaf) = if let Some((pkg, leaf)) = package {
+                let scope = match self.m.by_name.get(&format!("{pkg}::")) {
+                    Some(MRef::Scope(s)) => *s,
+                    _ => self.package_scope_header(pkg.to_string(), NONE, 0, false),
+                };
+                (scope, format!("{pkg}::"), leaf.to_string())
+            } else {
+                (
+                    s,
+                    format!("{full}."),
+                    flat.rsplit('.').next().unwrap_or(&flat).to_string(),
+                )
+            };
             // An unpacked array has no whole-array signal: its storage is its
             // first element.
-            let arr = if id == usize::MAX {
-                sim.module.arrays.get(flat.as_str()).copied()
+            let shape = package
+                .and_then(|_| sim.module.unpacked_decl_dims.get(&flat));
+            let arr = if id == usize::MAX || package.is_some() {
+                sim.module.arrays.get(flat.as_str()).copied().or_else(|| {
+                    shape.and_then(|d| d.first()).map(|&(lo, hi)| (lo, hi, 0))
+                })
             } else {
                 None
             };
@@ -1792,15 +1854,26 @@ impl<'a> Builder<'a> {
                 None if id == usize::MAX => continue,
                 None => (vpi_type_of(sim, &flat, id), id),
             };
-            let td = self.m.add_td(TDesc {
+            let mut desc = TDesc {
                 kind: TKind::Unknown,
                 signed: id != usize::MAX && sim.signal_signed.get(id).copied().unwrap_or(false),
                 packed: Vec::new(),
-                unpacked: arr
-                    .map(|(lo, hi, _)| vec![UDim::Range(lo, hi)])
+                unpacked: shape
+                    .map(|d| d.iter().map(|&(l, r)| UDim::Range(l, r)).collect())
+                    .or_else(|| arr.map(|(lo, hi, _)| vec![UDim::Range(lo, hi)]))
                     .unwrap_or_default(),
                 name: None,
-            });
+            };
+            // §37: artifacts retain declared element types, even without
+            // source text. Reuse the source descriptor for their elements.
+            if sim.module.source_texts.is_empty()
+                && let Some(dt) = sim.module.var_decl_types.get(&flat)
+            {
+                let unpacked = std::mem::take(&mut desc.unpacked);
+                desc = self.tdesc_inner(dt, &ctx, 0);
+                desc.unpacked = unpacked;
+            }
+            let td = self.m.add_td(desc);
             let d = if ty == c::PARAMETER {
                 OData::Param {
                     flat: flat.clone(),
@@ -1825,11 +1898,11 @@ impl<'a> Builder<'a> {
                     width: 0,
                 })
             };
-            self.m.add_obj(
+            let obj = self.m.add_obj(
                 MObj {
                     type_code: ty,
                     name: leaf.clone(),
-                    full: format!("{}.{}", full, leaf),
+                    full: format!("{}{}", full, leaf),
                     scope: s,
                     parent: NONE,
                     file: NONE,
@@ -1839,6 +1912,11 @@ impl<'a> Builder<'a> {
                 true,
                 true,
             );
+            if let Some((pkg, leaf)) = package {
+                self.m
+                    .by_name
+                    .insert(format!("{pkg}.{leaf}"), MRef::Obj(obj));
+            }
         }
     }
 

@@ -16654,6 +16654,15 @@ impl<'a> BytecodeCompiler<'a> {
                         return None;
                     }
                     if let Some(name) = self.lookup_array_name(hier) {
+                        // §7.4.2/§26.3: the newly resolved package store must
+                        // keep signed labels. The VM indexes through u64;
+                        // retain the qualified read's existing AST fallback.
+                        if name.contains("::")
+                            && self.arrays.get(&name).is_some_and(|&(lo, _, _)| lo < 0)
+                        {
+                            self.bail("package_array_signed_label");
+                            return None;
+                        }
                         let idx_reg = self.compile_expr(index, 0)?;
                         let dest = self.alloc_reg();
                         // §7.5 / §7.10: a dynamic array or queue reads its
