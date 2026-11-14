@@ -1556,6 +1556,9 @@ struct LocalArrayBind {
     elem_signed: Option<bool>,
 }
 
+/// Packed-member offset, width, and optional (signed, two-state) metadata.
+type PackedMemberInfo = (u32, u32, Option<(bool, bool)>);
+
 /// A member of a packed-struct formal that an inlined body reads as a slice
 /// of the formal's register.
 #[derive(Clone)]
@@ -2287,6 +2290,14 @@ pub struct BytecodeCompiler<'a> {
     /// input and never re-trigger when the real scoped input changes. Set via
     /// `set_packed_struct_fields`.
     packed_struct_fields: Option<&'a HashMap<String, Vec<(String, u32, u32)>>>,
+    // Operand types for nodes borrowed by the current outer expression compile.
+    packed_operand_types: HashMap<usize, (Option<bool>, u32)>,
+    packed_operand_scope: bool,
+    pub(super) packed_member_signs: std::rc::Rc<
+        std::cell::RefCell<
+            HashMap<String, HashMap<String, HashMap<String, Option<PackedMemberInfo>>>>,
+        >,
+    >,
 }
 
 impl<'a> BytecodeCompiler<'a> {
@@ -2426,6 +2437,9 @@ impl<'a> BytecodeCompiler<'a> {
             dynamic_arrays: None,
             queue_vars: None,
             packed_struct_fields: None,
+            packed_operand_types: Default::default(),
+            packed_operand_scope: false,
+            packed_member_signs: Default::default(),
         }
     }
 
@@ -2500,6 +2514,14 @@ impl<'a> BytecodeCompiler<'a> {
         &self,
         hier: &HierarchicalIdentifier,
     ) -> Option<(String, Vec<(String, u32, u32)>)> {
+        let (key, fields) = self.packed_struct_layout_for_hier_ref(hier)?;
+        Some((key, fields.to_vec()))
+    }
+
+    fn packed_struct_layout_for_hier_ref(
+        &self,
+        hier: &HierarchicalIdentifier,
+    ) -> Option<(String, &'a [(String, u32, u32)])> {
         if hier.path.iter().any(|s| !s.selects.is_empty()) {
             return None;
         }
@@ -2517,23 +2539,16 @@ impl<'a> BytecodeCompiler<'a> {
         }
         for candidate in candidates {
             if let Some(fields) = fields_map.get(candidate.as_str()) {
-                return Some((candidate, fields.clone()));
+                return Some((candidate, fields.as_slice()));
             }
         }
         None
     }
 
-    /// Compile either a packed-struct signal or a selected element of a packed
-    /// array of structs, retaining the root layout used to interpret members.
-    fn compile_packed_struct_value(
-        &mut self,
+    fn packed_struct_value_layout(
+        &self,
         expr: &Expression,
-    ) -> Option<(
-        RegId,
-        String,
-        HierarchicalIdentifier,
-        Vec<(String, u32, u32)>,
-    )> {
+    ) -> Option<(String, HierarchicalIdentifier, &'a [(String, u32, u32)])> {
         let mut unwrapped = expr;
         while let ExprKind::Paren(inner) = &unwrapped.kind {
             unwrapped = inner;
@@ -2554,9 +2569,28 @@ impl<'a> BytecodeCompiler<'a> {
             return None;
         }
         let hier = hier.clone();
-        let (key, fields) = self.packed_struct_layout_for_hier(&hier)?;
+        let (key, fields) = self.packed_struct_layout_for_hier_ref(&hier)?;
+        Some((key, hier, fields))
+    }
+
+    /// Compile either a packed-struct signal or a selected element of a packed
+    /// array of structs, retaining the root layout used to interpret members.
+    fn compile_packed_struct_value(
+        &mut self,
+        expr: &Expression,
+    ) -> Option<(
+        RegId,
+        String,
+        HierarchicalIdentifier,
+        Vec<(String, u32, u32)>,
+    )> {
+        let (key, hier, fields) = self.packed_struct_value_layout(expr)?;
+        let mut unwrapped = expr;
+        while let ExprKind::Paren(inner) = &unwrapped.kind {
+            unwrapped = inner;
+        }
         let value = self.compile_expr(unwrapped, 0)?;
-        Some((value, key, hier, fields))
+        Some((value, key, hier, fields.to_vec()))
     }
 
     /// The flattened member layout of a packed-struct formal, computed as the
@@ -9163,7 +9197,124 @@ impl<'a> BytecodeCompiler<'a> {
         })
     }
 
-    fn compile_packed_member_read(&mut self, hier: &HierarchicalIdentifier) -> Option<RegId> {
+    /// §7.2.1, §11.8.3: slicing a member must retain its declared sign
+    /// before assignment widening; the container's sign does not apply.
+    fn packed_member_info(
+        &self,
+        key: &str,
+        member: &str,
+        fields: &[(String, u32, u32)],
+    ) -> Option<PackedMemberInfo> {
+        // The memo is shared by compilers using the same immutable layout
+        // table. Local typedefs and inlined/method scopes keep their own lookup.
+        let cacheable = !self.method_mode
+            && self.local_typedef_types.is_empty()
+            && self.inlining_stack.is_empty();
+        let scope = self.scope_hint.as_deref().unwrap_or("");
+        if cacheable
+            && let Some(info) = self
+                .packed_member_signs
+                .borrow()
+                .get(scope)
+                .and_then(|roots| roots.get(key))
+                .and_then(|members| members.get(member))
+        {
+            return *info;
+        }
+        let info = fields
+            .iter()
+            .find(|(name, _, _)| name == member)
+            .map(|(_, off, width)| (*off, *width, self.packed_member_type_uncached(key, member)));
+        if cacheable {
+            self.packed_member_signs
+                .borrow_mut()
+                .entry(scope.to_string())
+                .or_default()
+                .entry(key.to_string())
+                .or_default()
+                .insert(member.to_string(), info);
+        }
+        info
+    }
+
+    fn packed_member_type_uncached(&self, key: &str, member: &str) -> Option<(bool, bool)> {
+        use crate::ast::types::DataType;
+        let mut dt = crate::compiler::packed_assignment_pattern_plan::declared_type(
+            key,
+            self.var_decl_types?,
+            self.port_aliases,
+        )?;
+        for seg in member.split('.').map(Some).chain(std::iter::once(None)) {
+            for _ in 0..64 {
+                let DataType::TypeReference {
+                    name, dimensions, ..
+                } = dt
+                else {
+                    break;
+                };
+                if !dimensions.is_empty() {
+                    return None;
+                }
+                let (key, target) = self.typedef_type_entry(name, None)?;
+                if self
+                    .typedef_unpacked_dims
+                    .is_some_and(|d| d.get(key).is_some_and(|v| !v.is_empty()))
+                {
+                    return None;
+                }
+                dt = target;
+            }
+            // §7.4.1: an array of signed elements is not itself signed.
+            if matches!(dt, DataType::TypeReference { .. })
+                || matches!(dt, DataType::Struct(s) if !s.dimensions.is_empty())
+            {
+                return None;
+            }
+            let Some(seg) = seg else {
+                let types = self.typedef_types?;
+                return Some((
+                    crate::compiler::elaborate::is_type_signed_resolved(dt, types),
+                    crate::compiler::elaborate::is_type_two_state_resolved(dt, types),
+                ));
+            };
+            let DataType::Struct(s) = dt else { return None };
+            dt = &s
+                .members
+                .iter()
+                .find(|m| {
+                    m.declarators
+                        .iter()
+                        .any(|d| d.name.name == seg && d.dimensions.is_empty())
+                })?
+                .data_type;
+        }
+        None
+    }
+
+    /// §11.6, §11.8.3–§11.8.4: extend a signed member in its signed
+    /// context, preserving an x/z sign bit in both execution tiers.
+    fn sign_packed_member(
+        &mut self,
+        dest: RegId,
+        width: u32,
+        ctx_width: u32,
+        unsigned: bool,
+        two_state: bool,
+    ) {
+        if !unsigned && !two_state && ctx_width > width {
+            let sign = self.alloc_reg();
+            self.emit(Insn::BitSelectConst(sign, dest, width - 1));
+            let fill = self.alloc_reg();
+            self.emit(Insn::Replicate(fill, sign, ctx_width - width));
+            self.emit(Insn::Concat(dest, Box::new(vec![fill, dest])));
+        }
+        self.emit(Insn::SetSigned(dest));
+    }
+
+    fn packed_member_read_info(
+        &self,
+        hier: &HierarchicalIdentifier,
+    ) -> Option<(usize, u32, u32, Option<(bool, bool)>)> {
         let fields_tbl = self.packed_struct_fields?;
         if hier.root.is_some() || hier.path.iter().any(|s| !s.selects.is_empty()) {
             return None;
@@ -9186,14 +9337,27 @@ impl<'a> BytecodeCompiler<'a> {
         }
         let (base_id, key) = resolved?;
         let layout = fields_tbl.get(&key).or_else(|| fields_tbl.get(base))?;
-        let &(_, off, w) = layout.iter().find(|(m, _, _)| m == member)?;
+        let (off, w, ty) = self.packed_member_info(&key, member, layout)?;
         if w == 0 {
             return None;
         }
+        Some((base_id, off, w, ty))
+    }
+
+    fn compile_packed_member_read(
+        &mut self,
+        hier: &HierarchicalIdentifier,
+        ctx_width: u32,
+        unsigned: bool,
+    ) -> Option<RegId> {
+        let (base_id, off, w, ty) = self.packed_member_read_info(hier)?;
         let root = self.alloc_reg();
         self.emit(Insn::LoadSignal(root, as_sig_id(base_id)));
         let dest = self.alloc_reg();
         self.emit(Insn::RangeSelectConst(dest, root, off + w - 1, off));
+        if let Some((true, two_state)) = ty {
+            self.sign_packed_member(dest, w, ctx_width, unsigned, two_state);
+        }
         Some(dest)
     }
 
@@ -15405,6 +15569,36 @@ impl<'a> BytecodeCompiler<'a> {
         ctx_width: u32,
         unsigned_context: bool,
     ) -> Option<RegId> {
+        // Keep address keys only while this borrowed tree is alive. Preseed
+        // its member subtrees; temporary expressions made during lowering are
+        // never inserted, so reuse of a temporary's address cannot hit a memo.
+        let outer = !self.packed_operand_scope;
+        if outer {
+            self.packed_operand_scope = true;
+            if matches!(
+                expr.kind,
+                ExprKind::Binary { .. }
+                    | ExprKind::Conditional { .. }
+                    | ExprKind::Paren(_)
+                    | ExprKind::Unary { .. }
+            ) {
+                self.prepare_packed_operand_types(expr);
+            }
+        }
+        let result = self.compile_expr_typed_inner(expr, ctx_width, unsigned_context);
+        if outer {
+            self.packed_operand_types.clear();
+            self.packed_operand_scope = false;
+        }
+        result
+    }
+
+    fn compile_expr_typed_inner(
+        &mut self,
+        expr: &Expression,
+        ctx_width: u32,
+        unsigned_context: bool,
+    ) -> Option<RegId> {
         // §10.8: only a pattern, or a parenthesised or conditional operand
         // holding one, takes the context type; other operands start without.
         let pattern_ctx = self.pattern_ctx.take();
@@ -15703,7 +15897,8 @@ impl<'a> BytecodeCompiler<'a> {
                     self.emit(Insn::LoadConst(r, Box::new(v)));
                     return Some(r);
                 }
-                if let Some(r) = self.compile_packed_member_read(hier) {
+                if let Some(r) = self.compile_packed_member_read(hier, ctx_width, unsigned_context)
+                {
                     return Some(r);
                 }
                 if std::env::var_os("XEZIM_PROBE_IDENT").is_some() {
@@ -17785,12 +17980,21 @@ impl<'a> BytecodeCompiler<'a> {
                 // are already flattened in the layout table.
                 let direct_start = self.insns.len();
                 let direct_reg = self.next_reg;
-                if let Some((root, _, _, fields)) = self.compile_packed_struct_value(base)
-                    && let Some((_, off, width)) =
-                        fields.iter().find(|(name, _, _)| name == &member.name)
+                if let Some((root, key, _, fields)) = self.compile_packed_struct_value(base)
+                    && let Some((off, width, ty)) =
+                        self.packed_member_info(&key, &member.name, &fields)
                 {
                     let dest = self.alloc_reg();
-                    self.emit(Insn::RangeSelectConst(dest, root, *off + *width - 1, *off));
+                    self.emit(Insn::RangeSelectConst(dest, root, off + width - 1, off));
+                    if let Some((true, two_state)) = ty {
+                        self.sign_packed_member(
+                            dest,
+                            width,
+                            ctx_width,
+                            unsigned_context,
+                            two_state,
+                        );
+                    }
                     return Some(dest);
                 }
                 self.truncate_insns(direct_start);
@@ -21310,6 +21514,14 @@ impl<'a> BytecodeCompiler<'a> {
     /// never truncate; a shift/divide OPERAND must take the LRM width or the
     /// dropped carry returns: `(a<<4)>>2` at 8 bits read 0x8c for 0x0c).
     fn lrm_self_width(&mut self, e: &Expression) -> u32 {
+        if !self.packed_operand_types.is_empty()
+            && self.packed_operand_cacheable()
+            && let Some((_, width)) = self
+                .packed_operand_types
+                .get(&(e as *const Expression as usize))
+        {
+            return *width;
+        }
         match &e.kind {
             ExprKind::Paren(i) => self.lrm_self_width(i),
             ExprKind::Number(NumberLiteral::Integer { size: Some(sz), .. }) => *sz,
@@ -21432,7 +21644,59 @@ impl<'a> BytecodeCompiler<'a> {
         }
     }
 
+    fn packed_operand_cacheable(&self) -> bool {
+        !self.method_mode && self.local_typedef_types.is_empty() && self.inlining_stack.is_empty()
+    }
+
+    // §11.8.1–§11.8.2: operand typing revisits subtrees while lowering
+    // binary expressions. Resolve each member leaf once in this fixed scope,
+    // including the self width queried when its sign makes a context unsigned.
+    fn prepare_packed_operand_types(&mut self, e: &Expression) {
+        if !self.packed_operand_cacheable() {
+            return;
+        }
+        let before = self.packed_operand_types.len();
+        match &e.kind {
+            ExprKind::Binary { left, right, .. } => {
+                self.prepare_packed_operand_types(left);
+                self.prepare_packed_operand_types(right);
+            }
+            ExprKind::Conditional {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                self.prepare_packed_operand_types(then_expr);
+                self.prepare_packed_operand_types(else_expr);
+            }
+            ExprKind::Paren(i) | ExprKind::Unary { operand: i, .. } => {
+                self.prepare_packed_operand_types(i);
+            }
+            ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => return,
+            ExprKind::Ident(_) | ExprKind::MemberAccess { .. } => {}
+            _ => return,
+        }
+        // Also reuse the sign of a subtree containing a member: unsigned
+        // propagation asks for it again at each enclosing binary operator.
+        if self.packed_operand_types.len() != before
+            || matches!(e.kind, ExprKind::Ident(_) | ExprKind::MemberAccess { .. })
+        {
+            let sign = self.expr_signedness(e);
+            let width = self.lrm_self_width(e);
+            self.packed_operand_types
+                .insert(e as *const Expression as usize, (sign, width));
+        }
+    }
+
     fn expr_signedness(&mut self, e: &Expression) -> Option<bool> {
+        if !self.packed_operand_types.is_empty()
+            && self.packed_operand_cacheable()
+            && let Some((sign, _)) = self
+                .packed_operand_types
+                .get(&(e as *const Expression as usize))
+        {
+            return *sign;
+        }
         if let Some((_, m)) = self.formal_struct_member(e) {
             return Some(m.signed);
         }
@@ -21474,6 +21738,22 @@ impl<'a> BytecodeCompiler<'a> {
                 self.handle_member_width(base, &member.name)?;
                 let class = self.method_handle_chain_class(base)?;
                 Some(self.class_field_signed(&class, &member.name))
+            }
+            // §11.8.1–§11.8.2: the two packed-member load sites also
+            // supply their sign to operand typing, so an unsigned neighbour
+            // still forces zero extension before a mixed operation.
+            ExprKind::Ident(h) => {
+                // A real signal or parameter keeps its existing load path.
+                if self.lookup_signal_id(h).is_some() || self.lookup_param_value(h).is_some() {
+                    return None;
+                }
+                self.packed_member_read_info(h)?.3.map(|(signed, _)| signed)
+            }
+            ExprKind::MemberAccess { expr: base, member } => {
+                let (key, _, fields) = self.packed_struct_value_layout(base)?;
+                self.packed_member_info(&key, &member.name, fields)?
+                    .2
+                    .map(|(signed, _)| signed)
             }
             // Part-selects, concatenations and replications are UNSIGNED
             // regardless of their operands (§11.8.1).

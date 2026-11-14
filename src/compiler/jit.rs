@@ -3035,8 +3035,8 @@ mod enabled {
     }
 
     /// Track the width each register holds, in program order. Regs are
-    /// allocated fresh per value by the bytecode compiler, so a linear walk is
-    /// sound; anything not understood records width 0 (= unknown, no mask).
+    /// allocated fresh per component block, but merged blocks reuse slots.
+    /// Anything not understood records width 0 (= unknown, no mask).
     pub fn update_reg_meta(
         insn: &Insn,
         reg_w: &mut [u32],
@@ -3105,7 +3105,12 @@ mod enabled {
             | ReduceOr(d, _)
             | ReduceXor(d, _)
             | BitSelect(d, ..)
-            | BitSelectConst(d, ..) => reg_s[*d as usize] = false,
+            | BitSelectConst(d, ..)
+            // §11.8.1: merged blocks reuse registers; a slice overwrites
+            // any signed tag left by the preceding packed-member load.
+            | LoadSignalBit(d, ..)
+            | LoadSignalRange(d, ..)
+            | RangeSelectConst(d, ..) => reg_s[*d as usize] = false,
             Select(d, _, t, e) => reg_s[*d as usize] = reg_s[*t as usize] && reg_s[*e as usize],
             _ => {}
         }
