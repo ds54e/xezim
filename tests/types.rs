@@ -735,3 +735,6 @@ mod packed_struct_array_member_reads_1088;
 mod struct_negative_array_pattern;
 #[path = "types/negative_index_compiled_blocks.rs"]
 mod negative_index_compiled_blocks;
+
+#[path = "types/unsigned_operand_kinds.rs"]
+mod unsigned_operand_kinds;
