@@ -362,7 +362,8 @@ fn method_boost_enabled() -> bool {
 // §6.16: a string-collection element read through a class handle compares as a string.
 // §7.4.2: an index into an array with a negative bound is sign-extended.
 // §10.9.1, §11.8.1, §7.2.1, §7.4.1, §11.4.14: typed pattern keys, operand signs, packed elements, stream widths.
-const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_3079;
+// §6.24.1 / §6.12.1: 64-bit integral casts convert real operands numerically.
+const METHOD_CACHE_COMPILER_SALT: u64 = 0x6370_6666_307a;
 
 /// The subroutine shape `try_run_compiled_method` plans for. Borrowed, so
 /// the per-call hooks (class methods, wait-free tasks, free functions) never
@@ -1695,7 +1696,8 @@ struct CombEntryCold {
 // unresolved reads; whole arrays through an instance-array element, named and
 // top-spelled struct-array actuals depend on their elements and members.
 // §10.9.1, §11.8.1, §7.2.1, §7.4.1, §11.4.14: typed pattern keys, operand signs, packed elements, stream widths.
-const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB037";
+// §6.24.1 / §6.12.1: 64-bit integral casts convert real operands numerically.
+const PREPARED_COMB_MAGIC: &[u8; 8] = b"XZCMB038";
 
 /// One `comb_dep_edges` element: a dependent entry and the bits of the
 /// signal it reads (`bytecode::sig_span_mask` chunks; all ones = any bit).
