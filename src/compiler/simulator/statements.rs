@@ -4183,16 +4183,18 @@ impl Simulator {
                 // statement carries on with the folded target, so its
                 // statement callbacks fire once.
                 let lvalue_folded;
-                let lvalue: &Expression = match Self::lvalue_has_incdec_index(lvalue)
-                    .then(|| self.rewrite_lvalue_index_side_effects(lvalue))
-                    .flatten()
-                {
-                    Some(f) => {
-                        lvalue_folded = f;
-                        &lvalue_folded
-                    }
-                    None => lvalue,
-                };
+                let lvalue: &Expression =
+                    match self.capture_member_part_indices(lvalue, true).or_else(|| {
+                        Self::lvalue_has_incdec_index(lvalue)
+                            .then(|| self.rewrite_lvalue_index_side_effects(lvalue))
+                            .flatten()
+                    }) {
+                        Some(f) => {
+                            lvalue_folded = f;
+                            &lvalue_folded
+                        }
+                        None => lvalue,
+                    };
                 // §14.4: normalize a plain dotted-chain lvalue (`vif.cb.data`
                 // inside a method) to the flat Ident the clocking-drive check
                 // below expects — the chain shape skipped the check and the

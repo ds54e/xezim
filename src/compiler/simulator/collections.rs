@@ -2755,6 +2755,75 @@ impl Simulator {
         }
     }
 
+    /// §11.5.1/§10.4.1: capture this packed-member part-write before
+    /// storage probes can evaluate its receiver. Other lvalue forms keep
+    /// their existing capture path. Capture even plain indices in order:
+    /// a later selector can change a variable read by an earlier selector.
+    pub(super) fn capture_member_part_indices(
+        &mut self,
+        lhs: &Expression,
+        bind_root: bool,
+    ) -> Option<Expression> {
+        let ExprKind::RangeSelect { expr, .. } = &lhs.kind else {
+            return None;
+        };
+        let ExprKind::Index { expr: base, .. } = &expr.kind else {
+            return None;
+        };
+        let mut field = base.as_ref();
+        while let ExprKind::Index { expr, .. } = &field.kind {
+            field = expr;
+        }
+        if !matches!(field.kind, ExprKind::MemberAccess { .. }) {
+            return None;
+        }
+        let effects = Self::lvalue_has_incdec_index(lhs);
+        if !bind_root && !effects {
+            return None;
+        }
+        let mut root = field;
+        while let ExprKind::Index { expr, .. } | ExprKind::MemberAccess { expr, .. } = &root.kind {
+            root = expr;
+        }
+        let ExprKind::Ident(h) = &root.kind else {
+            return None;
+        };
+        if h.path.iter().any(|seg| !seg.selects.is_empty()) {
+            return None;
+        }
+        let bound = bind_root
+            .then(|| self.resolve_hier_name(h).into_owned())
+            .filter(|name| self.module.var_decl_types.contains_key(name));
+        if !effects && bound.is_none() {
+            return None;
+        }
+        let mut captured = if effects {
+            self.rewrite_lvalue_indices(lhs, true)?
+        } else {
+            lhs.clone()
+        };
+        // §10.4.2/§23.9: the queued slice keeps its scheduling scope,
+        // as the neighbouring whole-element width lookup already does.
+        if let Some(name) = bound {
+            let mut root = &mut captured;
+            loop {
+                match &mut root.kind {
+                    ExprKind::Index { expr, .. }
+                    | ExprKind::MemberAccess { expr, .. }
+                    | ExprKind::RangeSelect { expr, .. } => root = expr,
+                    ExprKind::Ident(h) => {
+                        h.cached_signal_id = crate::ast::cache::SignalCache::new(None);
+                        h.cached_resolved_name = crate::ast::cache::NameCache::new();
+                        let _ = h.cached_resolved_name.set(name);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Some(captured)
+    }
+
     /// §11.4.1: an lvalue's index expressions are evaluated exactly ONCE per
     /// assignment. Rewrite every side-effecting index (`x[i++]`) to the
     /// literal value it evaluates to, applying the side effect here. Returns
@@ -2763,10 +2832,20 @@ impl Simulator {
         &mut self,
         lhs: &Expression,
     ) -> Option<Expression> {
+        self.rewrite_lvalue_indices(lhs, false)
+    }
+
+    // The member-part call site opts in to capturing plain selectors too;
+    // every existing caller retains the side-effect-only rewrite.
+    fn rewrite_lvalue_indices(
+        &mut self,
+        lhs: &Expression,
+        capture_all: bool,
+    ) -> Option<Expression> {
         match &lhs.kind {
             ExprKind::Index { expr, index } => {
-                let inner = self.rewrite_lvalue_index_side_effects(expr);
-                let idx_needs = !Self::cond_expr_is_effect_free(index, false);
+                let inner = self.rewrite_lvalue_indices(expr, capture_all);
+                let idx_needs = capture_all || !Self::cond_expr_is_effect_free(index, false);
                 if inner.is_none() && !idx_needs {
                     return None;
                 }
@@ -2790,9 +2869,9 @@ impl Simulator {
                 right,
                 kind,
             } => {
-                let inner = self.rewrite_lvalue_index_side_effects(expr);
-                let l_needs = !Self::cond_expr_is_effect_free(left, false);
-                let r_needs = !Self::cond_expr_is_effect_free(right, false);
+                let inner = self.rewrite_lvalue_indices(expr, capture_all);
+                let l_needs = capture_all || !Self::cond_expr_is_effect_free(left, false);
+                let r_needs = capture_all || !Self::cond_expr_is_effect_free(right, false);
                 if inner.is_none() && !l_needs && !r_needs {
                     return None;
                 }
@@ -2817,7 +2896,7 @@ impl Simulator {
                 ))
             }
             ExprKind::MemberAccess { expr, member } => {
-                let base = self.rewrite_lvalue_index_side_effects(expr)?;
+                let base = self.rewrite_lvalue_indices(expr, capture_all)?;
                 Some(Expression::new(
                     ExprKind::MemberAccess {
                         expr: Box::new(base),
@@ -2826,7 +2905,7 @@ impl Simulator {
                     lhs.span,
                 ))
             }
-            ExprKind::Paren(expr) => self.rewrite_lvalue_index_side_effects(expr),
+            ExprKind::Paren(expr) => self.rewrite_lvalue_indices(expr, capture_all),
             _ => None,
         }
     }

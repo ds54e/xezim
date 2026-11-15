@@ -6078,31 +6078,123 @@ impl Simulator {
                     // `qa[0][0][31:24] = v`): the arm above resolves only ONE
                     // Index layer — build the flat element name for the whole
                     // chain and apply the same read-modify-write.
-                    if let Some(ename) = self.flat_member_name(expr) {
-                        if let Some(cur) = self.get_signal_value_by_name(&ename) {
-                            let w = cur.width as usize;
-                            let mut nv = cur.clone();
-                            let mut changed = false;
-                            let hi2 = msb.min(w.saturating_sub(1));
-                            let base = if src_base < 0 { src_base } else { lsb as i64 };
-                            if msb_i >= 0 && hi2 >= lsb {
-                                for i in lsb..=hi2 {
-                                    let src = i as i64 - base;
-                                    if src < 0 {
-                                        continue;
-                                    }
-                                    let nb = val.get_bit(src as usize);
-                                    if nv.get_bit(i) != nb {
-                                        nv.set_bit(i, nb);
-                                        changed = true;
-                                    }
+                    let target = self.flat_member_name(expr).and_then(|name| {
+                        let cur = self.get_signal_value_by_name(&name)?;
+                        Some((name, 0, cur.width, cur, None))
+                    });
+                    // §7.2.1/§7.4.1/§11.5.1: a packed member element has
+                    // no separate signal. Reuse the whole-element resolver
+                    // and limit the part-write to that element's slice.
+                    // Net drivers (§6.6), package aliases (§26.3) and other
+                    // bit-label ranges retain their existing paths.
+                    let target = target.or_else(|| {
+                        // §11.5.1: wide indices truncate in these resolvers;
+                        // frozen 64-bit negatives may have lost unsignedness.
+                        let usable_index = |v: &Value| {
+                            v.width < 64 || (v.width == 64 && v.to_index().is_some_and(|i| i >= 0))
+                        };
+                        if !usable_index(&lval_b) || !usable_index(&rval_b) {
+                            return None;
+                        }
+                        let mut root_expr = expr.as_ref();
+                        while let ExprKind::Index { expr: base, .. }
+                        | ExprKind::MemberAccess { expr: base, .. } = &root_expr.kind
+                        {
+                            root_expr = base;
+                        }
+                        let ExprKind::Ident(h) = &root_expr.kind else {
+                            return None;
+                        };
+                        if h.path
+                            .first()
+                            .is_some_and(|s| self.module.packages.contains(&s.name.name))
+                        {
+                            return None;
+                        }
+                        let root = self.resolve_hier_name(h).into_owned();
+                        if self.module.nets.contains(&root)
+                            || self.contested_pkg_vars.contains(&root)
+                        {
+                            return None;
+                        }
+                        // §23.9: a resolved top-level backing name is exact;
+                        // a later comb block's hint must not redirect its read.
+                        let hint =
+                            (!root.contains('.')).then(|| self.name_resolve_hint.replace(None));
+                        let target = (|| {
+                            // Only admitted variables pay for index evaluation and geometry.
+                            let mut cur_expr = expr.as_ref();
+                            while let ExprKind::Index { expr: base, .. }
+                            | ExprKind::MemberAccess { expr: base, .. } = &cur_expr.kind
+                            {
+                                if let ExprKind::Index { index, .. } = &cur_expr.kind
+                                    && (!Self::cond_expr_is_effect_free(index, false)
+                                        || !usable_index(&self.eval_expr(index)))
+                                {
+                                    return None;
+                                }
+                                cur_expr = base;
+                            }
+                            let access = self.declared_packed_access(expr)?;
+                            let (name, off, w) = self.packed_struct_elem_slice(arr_expr, index)?;
+                            if self.module.nets.contains(&name)
+                                || self.contested_pkg_vars.contains(&name)
+                                || access.storage != name
+                                || access.offset != off
+                                || access.width != w
+                                || access.dimensions.as_slice() != [(w as i64 - 1, 0)]
+                            {
+                                return None;
+                            }
+                            let cur = self.get_signal_value_by_name(&name)?;
+                            // §10.8/§11.8.3: fit the RHS to the entire select,
+                            // including bits clipped outside the element.
+                            let piece_w =
+                                u32::try_from(msb_i.checked_sub(src_base)?.checked_add(1)?).ok()?;
+                            // §7.2.1/§6.11.2: a 2-state member can sit inside
+                            // a 4-state aggregate; convert only that member.
+                            let fitted = if val.has_xz()
+                                && super::elaborate::is_type_two_state_resolved(
+                                    &access.element_type,
+                                    &self.module.typedef_types,
+                                ) {
+                                Some(val.to_two_state().resize_for_assign(piece_w))
+                            } else if val.width != piece_w {
+                                Some(val.resize_for_assign(piece_w))
+                            } else {
+                                None
+                            };
+                            Some((name, off as usize, w, cur, fitted))
+                        })();
+                        if let Some(hint) = hint {
+                            self.name_resolve_hint.replace(hint);
+                        }
+                        target
+                    });
+                    if let Some((ename, off, w, cur, fitted)) = target {
+                        let val = fitted.as_ref().unwrap_or(val);
+                        let w = w as usize;
+                        let mut nv = cur.clone();
+                        let mut changed = false;
+                        let hi2 = msb.min(w.saturating_sub(1));
+                        let base = if src_base < 0 { src_base } else { lsb as i64 };
+                        if msb_i >= 0 && hi2 >= lsb {
+                            for i in lsb..=hi2 {
+                                let src = i as i64 - base;
+                                if src < 0 {
+                                    continue;
+                                }
+                                let nb = val.get_bit(src as usize);
+                                if nv.get_bit(off + i) != nb {
+                                    nv.set_bit(off + i, nb);
+                                    changed = true;
                                 }
                             }
-                            if changed {
-                                self.set_signal_value_by_name(&ename, nv);
-                            }
-                            return changed;
                         }
+                        if changed {
+                            self.set_signal_value_by_name(&ename, nv);
+                        }
+                        return changed;
                     }
                 }
                 false

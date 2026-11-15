@@ -1338,6 +1338,31 @@ impl Simulator {
         lvalue: &Expression,
         rvalue: &Expression,
     ) {
+        let captured = self.capture_member_part_indices(lvalue, false);
+        let captured_rhs;
+        let (lvalue, rvalue) = if let Some(lhs) = captured.as_ref() {
+            // A desugared compound assignment reads the same captured target.
+            captured_rhs = match &rvalue.kind {
+                ExprKind::Binary { op, left, right }
+                    if left.span == lvalue.span
+                        && std::mem::discriminant(&left.kind)
+                            == std::mem::discriminant(&lvalue.kind) =>
+                {
+                    Expression::new(
+                        ExprKind::Binary {
+                            op: *op,
+                            left: Box::new(lhs.clone()),
+                            right: right.clone(),
+                        },
+                        rvalue.span,
+                    )
+                }
+                _ => rvalue.clone(),
+            };
+            (lhs, &captured_rhs)
+        } else {
+            (lvalue, rvalue)
+        };
         if (Self::recv_chain_call(rvalue).is_some() || Self::recv_chain_call(lvalue).is_some())
             && let Some(base) = self.pin_stmt_recv_calls(&[rvalue, lvalue])
         {
