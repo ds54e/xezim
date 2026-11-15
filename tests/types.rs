@@ -20,6 +20,8 @@ mod constant_real_math_1089;
 mod deferred_type_contexts_721;
 #[path = "types/struct_array_continuous_sensitivity_1090.rs"]
 mod struct_array_continuous_sensitivity_1090;
+#[path = "types/struct_array_actual_sensitivity_1110.rs"]
+mod struct_array_actual_sensitivity_1110;
 
 #[path = "types/ansi_port_name_with_unpacked_dim.rs"]
 mod ansi_port_name_with_unpacked_dim;

@@ -1266,7 +1266,33 @@ impl Simulator {
             // port-connection source like `u.a = a` (where `a` is genuinely
             // the top signal, not `<scope>.a`).
             let entry_is_bytecode = matches!(&item, CombItem::CompiledContAssign { .. });
+            // §10.3.2, §23.9: resolve whole unpacked structs before
+            // signal/container fallbacks. A relative generate name belongs
+            // to the nearest enclosing scope; $root bypasses local shadows.
+            let mut struct_reads: HashSet<&str> = HashSet::default();
+            if !self.unpacked_struct_sens.is_empty() {
+                for r in &reads {
+                    if let Some(leaves) = self.unpacked_struct_read_sens(
+                        r,
+                        scope_hint.as_deref(),
+                        rooted_reads.contains(r),
+                    ) {
+                        rids.extend(leaves.iter().copied());
+                        struct_reads.insert(r.as_str());
+                    }
+                }
+                rids.sort_unstable();
+                rids.dedup();
+            }
             for r in &reads {
+                if struct_reads.contains(r.as_str())
+                    || (!struct_reads.is_empty() && self.module.functions.contains_key(r))
+                {
+                    // A function name is not an operand. Once its struct
+                    // actuals have dependencies, do not keep the call on the
+                    // unresolved-read fallback that wakes on unrelated writes.
+                    continue;
+                }
                 let mut found = false;
                 // Root-marked read: the name is absolute by construction —
                 // never scope-qualify it (bytecode resolve_ident and the AST

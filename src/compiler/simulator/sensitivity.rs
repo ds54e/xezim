@@ -729,7 +729,7 @@ impl Simulator {
         None
     }
 
-    /// Names of ROOT-marked identifiers (`root = Some("$root")`) in an
+    /// Names of `$root` and ROOT-marked identifiers (`root = Some("$root")`) in an
     /// expression — substituted port actuals whose bare name collides with a
     /// child declaration (core rewrite_expr_impl, issue #128). These resolve
     /// absolutely; the CA dependency machinery uses this set to keep the
@@ -737,10 +737,12 @@ impl Simulator {
     pub(super) fn collect_rooted_ident_names(e: &Expression, out: &mut HashSet<String>) {
         match &e.kind {
             ExprKind::Ident(h) => {
-                if h.root.is_some() {
+                let explicit_root = h.path.first().is_some_and(|s| s.name.name == "$root");
+                if h.root.is_some() || explicit_root {
                     let name = h
                         .path
                         .iter()
+                        .skip(usize::from(explicit_root))
                         .map(|s| s.name.name.as_str())
                         .collect::<Vec<_>>()
                         .join(".");
@@ -790,6 +792,9 @@ impl Simulator {
                 Self::collect_rooted_ident_names(right, out);
             }
             ExprKind::MemberAccess { expr, .. } => Self::collect_rooted_ident_names(expr, out),
+            ExprKind::NamedArg { expr: Some(e), .. } => {
+                Self::collect_rooted_ident_names(e, out);
+            }
             ExprKind::Call { func, args } => {
                 Self::collect_rooted_ident_names(func, out);
                 for a in args {
@@ -1073,6 +1078,11 @@ impl Simulator {
                 for e in exprs {
                     Self::collect_expr_reads(e, module, reads);
                 }
+            }
+            // §13.5.4, §10.3.2: the expression of a named actual is still
+            // an operand of the call, just as a positional actual is.
+            ExprKind::NamedArg { expr: Some(e), .. } => {
+                Self::collect_expr_reads(e, module, reads);
             }
             ExprKind::Call { func, args } => {
                 Self::collect_expr_reads(func, module, reads);

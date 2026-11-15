@@ -1650,6 +1650,29 @@ impl Simulator {
         out
     }
 
+    /// §10.3.2, §23.9: member dependencies of a whole struct operand,
+    /// using the existing lexical scope walk before the top-level spelling.
+    pub(super) fn unpacked_struct_read_sens(
+        &self,
+        name: &str,
+        scope: Option<&str>,
+        rooted: bool,
+    ) -> Option<&[usize]> {
+        let absolute = name
+            .strip_prefix(self.module.name.as_str())
+            .and_then(|rest| rest.strip_prefix('.'));
+        if !rooted && let Some(scope) = scope {
+            for scope in self.scopes_to_instance(scope) {
+                if let Some(leaves) = self.unpacked_struct_sens.get(&format!("{scope}.{name}")) {
+                    return Some(leaves);
+                }
+            }
+        }
+        self.unpacked_struct_sens
+            .get(absolute.unwrap_or(name))
+            .map(Vec::as_slice)
+    }
+
     /// Follow a typedef chain to the underlying type.
     pub(super) fn resolve_dt(&self, dt: &DataType) -> DataType {
         self.resolve_dt_ref(dt).clone()
