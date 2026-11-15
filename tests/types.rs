@@ -175,6 +175,8 @@ mod lrm_audit_procedural_locals;
 mod lrm_audit_struct_member_defaults;
 #[path = "types/lrm_dynamic_cast.rs"]
 mod lrm_dynamic_cast;
+#[path = "types/continuous_real_integral_casts.rs"]
+mod continuous_real_integral_casts;
 #[path = "types/lrm_real_cast_case_inside.rs"]
 mod lrm_real_cast_case_inside;
 #[path = "types/lrm_struct_union_dims.rs"]
