@@ -229,6 +229,8 @@ mod packed_multidim_unpacked_select;
 mod packed_struct_array_elem_member_in_instance;
 #[path = "types/packed_struct_array_elem_write.rs"]
 mod packed_struct_array_elem_write;
+#[path = "types/packed_struct_member_element_part_write.rs"]
+mod packed_struct_member_element_part_write;
 #[path = "types/packed_struct_array_local.rs"]
 mod packed_struct_array_local;
 #[path = "types/packed_struct_array_param_pattern_in_instance.rs"]
