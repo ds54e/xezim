@@ -16174,8 +16174,13 @@ impl<'a> BytecodeCompiler<'a> {
                     // `sa + b` in a 32-bit context read fffffff9 instead of
                     // 000000f9 (the $display path was already correct).
                     // Unknown signedness keeps the historical behavior.
-                    let ls = self.expr_signedness(left);
-                    let rs = self.expr_signedness(right);
+                    // Both unsigned contexts already suppress these scrubs;
+                    // do not recursively type the operands again just to skip them.
+                    let (ls, rs) = if left_unsigned && right_unsigned {
+                        (None, None)
+                    } else {
+                        (self.expr_signedness(left), self.expr_signedness(right))
+                    };
                     if ls == Some(false) || rs == Some(false) {
                         if !left_unsigned && !self.operand_scrub_is_noop(left) {
                             self.emit(Insn::ClearSigned(l));
@@ -16201,8 +16206,11 @@ impl<'a> BytecodeCompiler<'a> {
                         let opw = ctx_width
                             .max(self.lrm_self_width(left))
                             .max(self.lrm_self_width(right));
-                        let ls = self.expr_signedness(left);
-                        let rs = self.expr_signedness(right);
+                        let (ls, rs) = if left_unsigned && right_unsigned {
+                            (None, None)
+                        } else {
+                            (self.expr_signedness(left), self.expr_signedness(right))
+                        };
                         if ls == Some(false) || rs == Some(false) {
                             if !left_unsigned && !self.operand_scrub_is_noop(left) {
                                 self.emit(Insn::ClearSigned(l));
@@ -21602,6 +21610,89 @@ impl<'a> BytecodeCompiler<'a> {
                 let id = self.lookup_signal_id(h)?;
                 Some(self.signal_signed[id])
             }
+            // §11.8.1/§11.8.2: these operands also supply the unsigned
+            // context before their signed neighbour is widened. Only add
+            // unsigned facts here; signed aggregate reads retain their path.
+            ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => {
+                if h.path.first().is_some_and(|s| {
+                    self.local_var_regs.contains_key(&s.name.name)
+                        || (self.method_mode
+                            && !self.free_function_mode
+                            && self.class_shadow_names.contains(&s.name.name))
+                }) {
+                    return None;
+                }
+                if let Some(id) = self.lookup_signal_id(h) {
+                    return (!self.signal_signed[id]
+                        && !self.signal_real.is_some_and(|r| r.get(id) == Some(&true)))
+                    .then_some(false);
+                }
+                let raw = Self::hier_raw_name(h);
+                let param = self.params.and_then(|p| {
+                    p.get(&raw).or_else(|| {
+                        (h.root.is_none() && h.path.len() == 2)
+                            .then(|| format!("{}::{}", h.path[0].name.name, h.path[1].name.name))
+                            .and_then(|key| p.get(&key))
+                    })
+                });
+                if let Some(v) = param {
+                    return (!v.is_real && !v.is_signed).then_some(false);
+                }
+                if h.root.is_some()
+                    || h.path.len() != 2
+                    || (self.method_mode && !self.free_function_mode)
+                {
+                    return None;
+                }
+                let base = &h.path[0].name.name;
+                let types = self.var_decl_types?;
+                let dt = self
+                    .scope_hint
+                    .as_ref()
+                    .and_then(|sc| types.get(&cat_dot(sc, base)))
+                    .or_else(|| types.get(base))?;
+                let dt = self.resolved_decl_type(dt, None);
+                let crate::ast::types::DataType::Struct(su) = dt else {
+                    return None;
+                };
+                if su.kind != crate::ast::types::StructUnionKind::Union {
+                    return None;
+                }
+                let (signed, _) = self.struct_member_type(dt, &h.path[1].name.name)?;
+                (!signed).then_some(false)
+            }
+            ExprKind::Call { func, .. } => {
+                if self.method_mode && !self.free_function_mode {
+                    return None;
+                }
+                let ExprKind::Ident(h) = &func.kind else {
+                    return None;
+                };
+                if h.root.is_some() || h.path.len() != 1 || !h.path[0].selects.is_empty() {
+                    return None;
+                }
+                let name = self.scoped_callee_name(h.path[0].name.name.clone())?;
+                let dt = self.functions?.get(&name)?.return_type.clone();
+                match self.local_kind_of(&dt, Some(&name)) {
+                    Some(LocalKind::Int { signed: false, .. }) => Some(false),
+                    _ => None,
+                }
+            }
+            // Function bodies may keep the member-access spelling instead
+            // of the elaborated dotted identifier. Use the same metadata.
+            ExprKind::MemberAccess { expr: base, member }
+                if !self.method_mode || self.free_function_mode =>
+            {
+                let ExprKind::Ident(h) = &base.kind else {
+                    return None;
+                };
+                let mut h = h.clone();
+                h.path.push(crate::ast::expr::HierPathSegment {
+                    name: member.clone(),
+                    selects: Vec::new(),
+                });
+                self.expr_signedness(&Expression::new(ExprKind::Ident(h), e.span))
+            }
             ExprKind::MemberAccess { expr: base, member } if self.method_mode => {
                 self.handle_member_width(base, &member.name)?;
                 let class = self.method_handle_chain_class(base)?;
@@ -21654,6 +21745,22 @@ impl<'a> BytecodeCompiler<'a> {
                 "$unsigned" => Some(false),
                 // §6.24.1: a SIZE cast preserves the operand's signedness.
                 "$__xz_size_cast" => args.get(1).and_then(|a| self.expr_signedness(a)),
+                "$__xz_named_cast" => {
+                    use crate::ast::types::DataType;
+                    let key = self.named_cast_key(args.first()?)?;
+                    let dt = self.resolved_decl_type(self.typedef_types?.get(&key)?, None);
+                    if !matches!(
+                        dt,
+                        DataType::IntegerAtom { .. }
+                            | DataType::IntegerVector { .. }
+                            | DataType::Implicit { .. }
+                    ) {
+                        return None;
+                    }
+                    self.cast_widths?
+                        .get(&key)
+                        .and_then(|&(_, signed)| (!signed).then_some(false))
+                }
                 _ => None,
             },
             ExprKind::Unary { op, operand } => match op {

@@ -2204,6 +2204,29 @@ impl Simulator {
             }),
             ExprKind::SystemCall { name, .. } if name == "$signed" => Some(true),
             ExprKind::SystemCall { name, .. } if name == "$unsigned" => Some(false),
+            // §6.24.1/§11.8.2: a named integral cast supplies its unsigned
+            // result type even when a conditional selects the other arm.
+            ExprKind::SystemCall { name, args }
+                if name == "$__xz_named_cast"
+                    && args
+                        .first()
+                        .and_then(|a| self.named_cast_key(a))
+                        .and_then(|key| self.module.typedef_types.get(&key))
+                        .is_some_and(|dt| {
+                            let dt = super::elaborate::resolve_typedef_chain(
+                                dt,
+                                &self.module.typedef_types,
+                            );
+                            matches!(
+                                dt,
+                                DataType::IntegerAtom { .. }
+                                    | DataType::IntegerVector { .. }
+                                    | DataType::Implicit { .. }
+                            ) && !super::elaborate::is_type_signed(dt)
+                        }) =>
+            {
+                Some(false)
+            }
             _ => self
                 .get_expr_type_name(expr)
                 .and_then(|name| self.concrete_type_signed(&name)),
