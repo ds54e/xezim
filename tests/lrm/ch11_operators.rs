@@ -269,3 +269,32 @@ fn c11_operators() {
         &["T|11.4.3d|", "T|11.4.3i|", "T|11.4.11c|", "T|11.4.13c|"],
     );
 }
+
+// §6.12, §11.4.3, §20.5: IEEE 754 unary negation preserves signed zero.
+#[test]
+fn c11_4_3_real_negation() {
+    check(
+        "11.4.3_real_negation",
+        include_str!("sv/11.4.3_real_negation.sv"),
+        "real_negation",
+        Order::Exact,
+        &[
+            "T|zero|8000000000000000 8000000000000000 8000000000000000 8000000000000000",
+            "T|const|8000000000000000 8000000000000000",
+            "T|subtract|0000000000000000 0000000000000000",
+            "T|format|-0.000000e+00",
+            "T|negative_zero|0000000000000000 0000000000000000 0000000000000000",
+            "T|positive|bff8000000000000 bff8000000000000 bff8000000000000",
+            "T|negative|3ff8000000000000 3ff8000000000000 3ff8000000000000",
+            "T|method|8000000000000000",
+            "T|compiled_local|8000000000000000",
+            "T|infinity|fff0000000000000",
+            "T|negative_infinity|7ff0000000000000",
+            "T|nan|1 1 1",
+            "T|shortreal|80000000",
+            "T|shortreal_negative|00000000",
+            "T|integer|-7 fd 3 ffffffffffffffffffffffff xx",
+        ],
+        &[],
+    );
+}
