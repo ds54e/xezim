@@ -4038,6 +4038,8 @@ impl Simulator {
                 };
                 match op {
                     UnaryOp::Plus => v,
+                    // §6.12, §11.4.3: real negation flips the sign, including zero.
+                    UnaryOp::Minus if v.is_real => v.negate(),
                     UnaryOp::Minus => {
                         let mut r = Value::zero(v.width).sub(&v).resize(v.width);
                         // §11.8.1: unary minus preserves its operand type.

@@ -207,6 +207,10 @@ impl Simulator {
                 Insn::LogNot(d, s) => {
                     vm_regs[*d as usize] = vm_regs[*s as usize].logic_not();
                 }
+                // §6.12, §11.4.3: subtraction from zero loses real +0.0's sign.
+                Insn::Negate(d, s) if vm_regs[*s as usize].is_real => {
+                    vm_regs[*d as usize] = vm_regs[*s as usize].negate();
+                }
                 Insn::Negate(d, s) => {
                     let w = vm_regs[*s as usize].width;
                     let mut r = Value::zero(w).sub(&vm_regs[*s as usize]).resize(w);
@@ -1022,6 +1026,10 @@ impl Simulator {
                 }
                 Insn::LogNot(d, s) => {
                     vm_regs[*d as usize] = vm_regs[*s as usize].logic_not();
+                }
+                // §6.12, §11.4.3: subtraction from zero loses real +0.0's sign.
+                Insn::Negate(d, s) if vm_regs[*s as usize].is_real => {
+                    vm_regs[*d as usize] = vm_regs[*s as usize].negate();
                 }
                 Insn::Negate(d, s) => {
                     let w = vm_regs[*s as usize].width;
@@ -3385,6 +3393,10 @@ impl Simulator {
                         Some((v, x)) => vm_store(&mut self.vm_regs[d], v, x, 1, false),
                         None => self.vm_regs[d] = self.vm_regs[s].logic_not(),
                     }
+                }
+                // §6.12, §11.4.3: subtraction from zero loses real +0.0's sign.
+                Insn::Negate(d, s) if self.vm_regs[*s as usize].is_real => {
+                    self.vm_regs[*d as usize] = self.vm_regs[*s as usize].negate();
                 }
                 Insn::Negate(d, s) => {
                     let w = self.vm_regs[*s as usize].width;
