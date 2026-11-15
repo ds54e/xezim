@@ -514,3 +514,6 @@ mod function_call_assign_reads_1126;
 mod instance_array_member_reads_1108;
 #[path = "scheduling/struct_array_actual_paths_1110.rs"]
 mod struct_array_actual_paths_1110;
+
+#[path = "scheduling/named_fork_instances.rs"]
+mod named_fork_instances;
