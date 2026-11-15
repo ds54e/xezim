@@ -5273,8 +5273,15 @@ impl Simulator {
                 }
                 self.auto_loop_vars.truncate(saved_auto_len);
                 if let Some(nm) = block_name {
+                    // §9.6.2: keep the exact declaring scope alongside the
+                    // legacy label used when the target cannot be resolved.
                     self.fork_block_children
                         .insert(nm.name.clone(), child_set.clone());
+                    if !nm.name.contains(['.', '[', ']'])
+                        && let Some(key) = self.named_fork_key(&nm.name)
+                    {
+                        self.fork_block_children.insert(key, child_set.clone());
+                    }
                 }
                 match join_type {
                     // `join` waits for all, `join_any` for the first; both suspend
@@ -5789,7 +5796,7 @@ impl Simulator {
                 // fork block has already returned, so trying to unwind to it
                 // below would run off the end of the disabling process and drop
                 // its continuation — which is exactly what used to happen.
-                if let Some(children) = self.fork_block_children.get(name).cloned() {
+                if let Some(children) = self.named_fork_children(target).cloned() {
                     let mut to_kill: HashSet<usize> = HashSet::default();
                     for &c in &children {
                         to_kill.insert(c);

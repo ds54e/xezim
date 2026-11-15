@@ -296,6 +296,72 @@ impl Simulator {
         }
     }
 
+    /// Scoped registry keys cannot alias a bare escaped label (§5.6.1).
+    pub(super) fn named_fork_key(&self, path: &str) -> Option<String> {
+        if self.class_context_stack.last().is_some_and(|c| c.is_some())
+            || self
+                .process_m_label
+                .get(&self.current_pid)
+                .is_some_and(|s| s.contains(['.', '[', ']']))
+            || self.m_scope_stack.iter().any(|s| {
+                s.strip_prefix(M_ROOT_MARK).map_or_else(
+                    || s.contains(['.', '[', ']']),
+                    |root| self.module.packages.contains(root),
+                )
+            })
+        {
+            return None;
+        }
+        Some(format!("\0{}.{}", self.m_path(), path))
+    }
+
+    /// §9.6.2, §23.9: a named fork belongs to its declaring scope, not to
+    /// every instance with the same label. Resolve only this fork registry;
+    /// other disable targets retain their own resolution paths.
+    pub(super) fn named_fork_children(
+        &self,
+        target: &crate::ast::expr::HierarchicalIdentifier,
+    ) -> Option<&HashSet<usize>> {
+        let legacy = self
+            .fork_block_children
+            .get(crate::ast::stmt::disable_name(target))?;
+        // §23.9: this registry proves current-scope matches only. Rooted or
+        // upward paths need static binding, including inactive declarations.
+        if target.root.is_some() || target.path.first().is_some_and(|s| s.name.name == "$root") {
+            return Some(legacy);
+        }
+        let mut path = String::new();
+        for (i, seg) in target.path.iter().enumerate() {
+            if seg.name.name.contains(['.', '[', ']']) {
+                return Some(legacy);
+            }
+            if i > 0 {
+                path.push('.');
+            }
+            path.push_str(&seg.name.name);
+            for sel in &seg.selects {
+                use std::fmt::Write as _;
+                // §5.7.1: sized/signed literals may truncate or sign-extend;
+                // the spelling-only helper is exact for small unsized decimals.
+                let index = match &sel.kind {
+                    ExprKind::Number(NumberLiteral::Integer {
+                        size: None,
+                        base: NumberBase::Decimal,
+                        ..
+                    }) => Self::try_const_u64(sel).filter(|i| *i <= i32::MAX as u64),
+                    _ => None,
+                };
+                let Some(index) = index else {
+                    return Some(legacy);
+                };
+                let _ = write!(path, "[{index}]");
+            }
+        }
+        self.named_fork_key(&path)
+            .and_then(|key| self.fork_block_children.get(&key))
+            .or(Some(legacy))
+    }
+
     pub(super) fn disable_remote_block(&mut self, x: &str) {
         self.disable_remote_block_of(x, None);
     }

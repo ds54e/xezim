@@ -8891,7 +8891,7 @@ pub struct Simulator {
     /// Label of a process-level named block (`initial begin : worker`) -> its
     /// pid, so `disable worker` from another process can terminate it.
     disable_labels: HashMap<String, usize>,
-    /// A named `fork : blk ... join*` maps to the processes it spawned, so
+    /// A named fork by full scope path (and legacy label) maps to its processes, so
     /// `disable blk` can terminate them (§9.6.2). Without this, disabling a
     /// join_none fork block — which has already returned — unwound the
     /// DISABLING process instead, dropping its continuation.

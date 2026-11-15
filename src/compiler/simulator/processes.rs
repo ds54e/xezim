@@ -5509,8 +5509,15 @@ impl Simulator {
                 }
                 self.auto_loop_vars.truncate(saved_auto_len);
                 if let Some(nm) = block_name {
+                    // §9.6.2: keep the exact declaring scope alongside the
+                    // legacy label used when the target cannot be resolved.
                     self.fork_block_children
                         .insert(nm.name.clone(), child_pids.clone());
+                    if !nm.name.contains(['.', '[', ']'])
+                        && let Some(key) = self.named_fork_key(&nm.name)
+                    {
+                        self.fork_block_children.insert(key, child_pids.clone());
+                    }
                 }
 
                 // An empty fork (or one whose only items were declarations)
