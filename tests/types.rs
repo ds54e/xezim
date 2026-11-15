@@ -767,3 +767,6 @@ mod owned_aggregate_storage_1132_1147;
 
 #[path = "types/net_typedef_metadata_1212.rs"]
 mod net_typedef_metadata_1212;
+
+#[path = "types/qualified_nettype_resolver.rs"]
+mod qualified_nettype_resolver;
