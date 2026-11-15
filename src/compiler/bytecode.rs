@@ -11124,12 +11124,63 @@ impl<'a> BytecodeCompiler<'a> {
                 .is_some_and(real)
     }
 
+    // §6.16/§6.24.3: (string target, source requiring packing), at this binding.
+    fn stream_signal_kind(&self, h: &HierarchicalIdentifier) -> (bool, bool) {
+        let Some(id) = self.lookup_signal_id(h) else {
+            return (false, false);
+        };
+        let raw = Self::hier_raw_cow(h);
+        let scoped = match (&self.scope_hint, &h.root) {
+            (Some(s), None) => Some(cat_dot(s, &raw)),
+            _ => None,
+        };
+        let top = self.top_module_name.as_deref();
+        let top = top.and_then(|t| raw.strip_prefix(t)?.strip_prefix('.'));
+        let names = if raw.contains('.') {
+            [Some(raw.as_ref()), scoped.as_deref(), top]
+        } else {
+            [scoped.as_deref(), Some(raw.as_ref()), top]
+        };
+        for n in names.into_iter().flatten() {
+            if self.signal_name_to_id.get(n).copied() != Some(id) {
+                continue;
+            }
+            if let Some(t) = self
+                .var_decl_types
+                .and_then(|m| m.get(n))
+                .or_else(|| self.param_decl_types.and_then(|m| m.get(n)))
+            {
+                use crate::ast::types::DataType as D;
+                let t = self.typedef_types.map_or(t, |types| {
+                    crate::compiler::elaborate::resolve_typedef_chain(t, types)
+                });
+                let string = Self::dt_is_string(t);
+                let object = matches!(t, D::Struct(s) if !s.packed)
+                    || matches!(t, D::TypeReference { dimensions, .. } if dimensions.is_empty());
+                return (string, string || object);
+            }
+            if self.string_signals.is_some_and(|m| m.contains(n)) {
+                return (true, true);
+            }
+        }
+        (false, false)
+    }
+
     /// §10.7/§11.8.2: the context width an assignment gives its right-hand
     /// side. A REAL target has no bit width to lend: an integral RHS is
     /// evaluated self-determined and then converted (`r = u - 2` with
     /// `int unsigned u = 1` is 4294967295.0, `r = x + 1` wraps at 32 bits).
     fn assign_rhs_ctx(&self, lvalue: &Expression, width: u32) -> u32 {
-        if matches!(lvalue.kind, ExprKind::Ident(_)) && self.expr_is_real_static(lvalue) {
+        // §6.16/§11.4.14: strings lend no width; locals/members keep theirs.
+        if (matches!(lvalue.kind, ExprKind::Ident(_)) && self.expr_is_real_static(lvalue))
+            || matches!(&lvalue.kind, ExprKind::Ident(h)
+                if h.path.iter().all(|s| s.selects.is_empty())
+                    && self.local_var_reg_of(h).is_none()
+                    && !(self.method_mode && h.root.is_none() && h.path.len() == 1
+                        && (self.bare_member_names.contains(h.path[0].name.name.as_str())
+                            || self.class_shadow_names.contains(h.path[0].name.name.as_str())))
+                    && self.stream_signal_kind(h).0)
+        {
             0
         } else {
             width
@@ -17539,7 +17590,6 @@ impl<'a> BytecodeCompiler<'a> {
                         inner = i;
                     }
                     let w = match &inner.kind {
-                        // A whole signal: the signal table is authoritative.
                         ExprKind::Ident(h) if h.path.iter().all(|s| s.selects.is_empty()) => self
                             .lookup_signal_id(h)
                             .and_then(|id| self.signal_widths.get(id).copied())
@@ -17572,14 +17622,54 @@ impl<'a> BytecodeCompiler<'a> {
                     widths.push(w);
                 }
                 let total_w: u32 = widths.iter().sum();
+                let mut skip_padding = false;
                 let mut regs = Vec::with_capacity(exprs.len());
                 for e in exprs {
-                    regs.push(self.compile_expr(e, 0)?);
+                    let start = self.insns.len();
+                    let r = self.compile_expr(e, 0)?;
+                    let mut inner = e;
+                    while let ExprKind::Paren(i) = &inner.kind {
+                        inner = i;
+                    }
+                    // §11.4.14/§23.9: a fixed context needs the actual binding.
+                    if ctx_width != 0
+                        && let ExprKind::Ident(h) = &inner.kind
+                    {
+                        let id = self.lookup_signal_id(h).map(as_sig_id);
+                        skip_padding |= ctx_width > total_w && self.stream_signal_kind(h).1;
+                        if !matches!(&self.insns[start..],
+                            [Insn::LoadSignal(dst, sid) | Insn::LoadSignalSigned(dst, sid)]
+                                if *dst == r && Some(*sid) == id)
+                        {
+                            self.bail("Stream_operand_shape");
+                            return None;
+                        }
+                    }
+                    if let ExprKind::RangeSelect { expr: base, .. } = &inner.kind
+                        && let ExprKind::Ident(h) = &base.kind
+                    {
+                        skip_padding |= !matches!(self.insns.get(start),
+                            Some(Insn::LoadSignal(_, s) | Insn::LoadSignalSigned(_, s))
+                                if Some(*s) == self.lookup_signal_id(h).map(as_sig_id));
+                    }
+                    regs.push(r);
                 }
                 let src = self.alloc_reg();
                 self.emit(Insn::Concat(src, Box::new(regs)));
+                // §11.4.14: right-fill after reordering, only at a proven width.
+                let pad = |me: &mut Self, stream: RegId| -> RegId {
+                    if ctx_width <= total_w || skip_padding {
+                        return stream;
+                    }
+                    let zero = me.alloc_reg();
+                    let padding = Value::zero(ctx_width - total_w);
+                    me.emit(Insn::LoadConst(zero, Box::new(padding)));
+                    let dst = me.alloc_reg();
+                    me.emit(Insn::Concat(dst, Box::new(vec![stream, zero])));
+                    dst
+                };
                 if !*left_to_right {
-                    return Some(src);
+                    return Some(pad(self, src));
                 }
                 // `{<<N{…}}`: N must be a constant to know the chunking.
                 let slice = match slice_size {
@@ -17594,7 +17684,7 @@ impl<'a> BytecodeCompiler<'a> {
                 };
                 if slice >= total_w {
                     // One chunk (plus nothing to reverse): identity.
-                    return Some(src);
+                    return Some(pad(self, src));
                 }
                 let full = total_w / slice;
                 let rem = total_w - full * slice;
@@ -17626,7 +17716,7 @@ impl<'a> BytecodeCompiler<'a> {
                 }
                 let dst = self.alloc_reg();
                 self.emit(Insn::Concat(dst, Box::new(parts)));
-                Some(dst)
+                Some(pad(self, dst))
             }
             ExprKind::SystemCall { name, args } => match name.as_str() {
                 // §6.24.3: a cast whose operand is an UNPACKED array/queue
@@ -21641,7 +21731,8 @@ impl<'a> BytecodeCompiler<'a> {
 
     /// Compile a continuous assign: evaluate RHS, write to pre-resolved LHS.
     /// Returns true if compiled successfully.
-    pub fn compile_cont_assign(&mut self, rhs: &Expression, dst_id: usize, width: u32) -> bool {
+    pub fn compile_cont_assign(&mut self, rhs: &Expression, id: usize, lhs: &Expression) -> bool {
+        let width = self.signal_widths[id];
         // Verilog context width = max(LHS width, RHS self-determined width).
         // Using just the LHS width truncates intermediates when operands
         // (e.g. 32-bit parameters) are wider than the target wire — but the
@@ -21650,14 +21741,19 @@ impl<'a> BytecodeCompiler<'a> {
         // into shift results (`assign r = (a<<4)>>2` on 8-bit r computed the
         // inner shift at 12 bits and read 0x8c for 0x0c — while the IDENTICAL
         // always_comb, compiled with the plain LHS width, was correct).
-        let ctx = width.max(self.lrm_self_width(rhs));
+        // §6.16/§11.4.14: a string's placeholder width is not a context.
+        let ctx = if matches!(&lhs.kind, ExprKind::Ident(h) if self.stream_signal_kind(h).0) {
+            0
+        } else {
+            width.max(self.lrm_self_width(rhs))
+        };
         if let Some(val_reg) = self.compile_expr(rhs, ctx) {
             if self.register_overflow {
                 self.bail("bytecode_register_limit");
                 return false;
             }
             self.emit(Insn::Resize(val_reg, width));
-            self.emit(Insn::BlockingAssign(as_sig_id(dst_id), val_reg, width));
+            self.emit(Insn::BlockingAssign(as_sig_id(id), val_reg, width));
             true
         } else {
             false

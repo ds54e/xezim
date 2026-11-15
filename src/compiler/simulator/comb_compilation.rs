@@ -1100,7 +1100,7 @@ impl Simulator {
                 if let Some(c) = cov_counter {
                     compiler.emit_cov_hit(c);
                 }
-                if compiler.compile_cont_assign(&ca.rhs, dst_id, width) {
+                if compiler.compile_cont_assign(&ca.rhs, dst_id, &ca.lhs) {
                     CombItem::CompiledContAssign {
                         compiled: compiler.finish(),
                     }
