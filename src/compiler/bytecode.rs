@@ -17841,6 +17841,12 @@ impl<'a> BytecodeCompiler<'a> {
                         self.emit_to_real(r);
                         return Some(r);
                     }
+                    // §6.24.1 / §6.12.1: a 64-bit integral cast must
+                    // convert a real numerically. Resize(64) preserves reals;
+                    // use the same 65-bit intermediate as integral returns.
+                    if integral && w == 64 {
+                        self.emit(Insn::Resize(r, 65));
+                    }
                     self.emit(Insn::Resize(r, w));
                     // §6.24.1: the cast value is what a variable of the
                     // target type holds, so a 2-state target (`int'`,
@@ -17960,6 +17966,25 @@ impl<'a> BytecodeCompiler<'a> {
                         // the loop exactly this way.
                         let r = self.alloc_reg();
                         self.emit(Insn::Move(r, src));
+                        // §6.24.1 / §6.12.1: integral typedef targets
+                        // need the same real conversion as built-in casts.
+                        // Resolve in the typedef's scope; an unresolved or
+                        // real target keeps its existing lowering, as do sizes.
+                        if w == 64
+                            && signed.is_some()
+                            && target
+                                .as_ref()
+                                .and_then(|name| self.typedef_types?.get(name))
+                                .is_some_and(|dt| {
+                                    matches!(
+                                        self.resolved_decl_type(dt, target.as_deref()),
+                                        crate::ast::types::DataType::IntegerAtom { .. }
+                                            | crate::ast::types::DataType::IntegerVector { .. }
+                                    )
+                                })
+                        {
+                            self.emit(Insn::Resize(r, 65));
+                        }
                         self.emit(Insn::Resize(r, w));
                         // §6.24.1: a named two-state type also converts X/Z.
                         if let Some(types) = self.typedef_types {
