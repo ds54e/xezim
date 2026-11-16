@@ -659,3 +659,8 @@ mod replication_signedness_1095;
 mod localparam_self_determined_1143;
 #[path = "misc/comb_timescale.rs"]
 mod comb_timescale;
+#[path = "misc/sva_default_arguments.rs"]
+mod sva_default_arguments;
+
+#[path = "misc/sva_default_binding_guards.rs"]
+mod sva_default_binding_guards;
