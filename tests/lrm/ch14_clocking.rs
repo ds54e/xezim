@@ -274,3 +274,56 @@ fn c14_4_clocking_edge_skew_select_alias_and_delay() {
         &[],
     );
 }
+
+// §14.3, §14.5, §14.13, §11.6, §11.8: typed input expressions.
+#[test]
+fn c14_5_clocking_input_expressions() {
+    check(
+        "14.5_clocking_input_expressions",
+        include_str!("sv/14.5_clocking_input_expressions.sv"),
+        "top",
+        Order::Exact,
+        &[
+            "T|expr|a=3 sum=4 cat=6 signed=-3 mixed=124",
+            "T|types|big=80000000000000000003 states=10xzz nonzero=1",
+            "T|constant|rep=8080 value=4",
+            "T|guard|slice=8 hier=11",
+        ],
+        &[],
+    );
+}
+
+// §14.4, §14.5, §14.13: sample the expression at the input skew.
+#[test]
+fn c14_13_clocking_expression_skews() {
+    check(
+        "14.13_clocking_expression_skews",
+        include_str!("sv/14.13_clocking_expression_skews.sv"),
+        "top",
+        Order::Exact,
+        &[
+            "T|skew|default=8 step=8 zero=10 one=4 direct=7",
+            "T|held|default=8 zero=10",
+        ],
+        &[],
+    );
+}
+
+// §14.5, §14.6, §14.11, §14.12, §14.13, §14.16: instance and drive guards.
+#[test]
+fn c14_5_clocking_expression_instances() {
+    check(
+        "14.5_clocking_expression_instances",
+        include_str!("sv/14.5_clocking_expression_instances.sv"),
+        "top",
+        Order::Exact,
+        &[
+            "T|instance|b=4 c=8 cat=14 child=22",
+            "T|two|a=3/3 expr=4/4",
+            "T|output|q=9 r=0",
+            "T|delayed|q=9 r=9",
+            "T|cycle|time=26 sum=4",
+        ],
+        &[],
+    );
+}

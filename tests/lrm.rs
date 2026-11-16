@@ -79,6 +79,8 @@ mod ch34_protected_envelopes;
 mod ch35_dpi;
 #[path = "lrm/ch36_vpi.rs"]
 mod ch36_vpi;
+#[path = "lrm/clocking_expression_edges.rs"]
+mod clocking_expression_edges;
 #[path = "lrm/constraint_real_bounds.rs"]
 mod constraint_real_bounds;
 #[path = "lrm/harness.rs"]
