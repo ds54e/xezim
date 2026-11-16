@@ -6222,7 +6222,11 @@ impl Simulator {
                     let resolved_expr: Expression = match &a.expr.kind {
                         ExprKind::Ident(h) if h.path.len() == 1 => {
                             let name = &h.path[0].name.name;
-                            if let Some(body) = self.module.property_decls.get(name).cloned() {
+                            // §26.3: a local signal hides an imported sequence,
+                            // including a bare assertion using the default clock.
+                            if self.sva_scope_name(&a.expr).is_none()
+                                && let Some(body) = self.sva_bind_named(name, &[])
+                            {
                                 body
                             } else {
                                 a.expr.clone()
@@ -6247,28 +6251,7 @@ impl Simulator {
                                 }
                                 _ => None,
                             };
-                            let resolved = pname.and_then(|n| {
-                                let body = self.module.property_decls.get(&n).cloned()?;
-                                let formals = self
-                                    .module
-                                    .property_params
-                                    .get(&n)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let mut map: HashMap<String, Expression> = HashMap::default();
-                                for (i, f) in formals.iter().enumerate() {
-                                    if let Some(actual) = args.get(i) {
-                                        map.insert(f.clone(), actual.clone());
-                                    }
-                                }
-                                Some(super::elaborate::rewrite_expr(
-                                    &body,
-                                    "",
-                                    &map,
-                                    &std::collections::HashSet::new(),
-                                    &HashMap::default(),
-                                ))
-                            });
+                            let resolved = pname.and_then(|n| self.sva_bind_named(&n, args));
                             resolved.unwrap_or_else(|| a.expr.clone())
                         }
                         _ => a.expr.clone(),

@@ -39,7 +39,13 @@ impl Simulator {
     /// in memory, which cost 0.6% more instructions on a design with 288
     /// named properties.
     pub(super) fn fold_named_sva_members(module: &mut ElaboratedModule) {
-        if !module.property_decls.values().any(Self::has_member_access) {
+        if !module.property_decls.values().any(Self::has_member_access)
+            && !module
+                .property_defaults
+                .values()
+                .flat_map(|d| d.values())
+                .any(Self::has_member_access)
+        {
             return;
         }
         // §3.12.1: keep `$unit::x` where the scope shadows `x`, as the
@@ -50,6 +56,24 @@ impl Simulator {
             .filter(|k| k.starts_with("$unit::"))
             .cloned()
             .collect();
+        // §16.8/§16.5.1: stored defaults need the body's name rewrite too,
+        // so package and clocking-block references participate in sampling.
+        for default in module
+            .property_defaults
+            .values_mut()
+            .flat_map(|d| d.values_mut())
+        {
+            if !Self::has_member_access(default) {
+                continue;
+            }
+            *default = super::elaborate::rewrite_expr(
+                default,
+                "",
+                &HashMap::default(),
+                &unit,
+                &HashMap::default(),
+            );
+        }
         for body in module.property_decls.values_mut() {
             if Self::has_member_access(body) {
                 *body = super::elaborate::rewrite_expr(
@@ -150,34 +174,39 @@ impl Simulator {
         }
     }
 
-    /// The storage `blk[1].sig` names (see `sva_fold_scopes`): `None` unless
-    /// the chain has a select, every select is a constant (a generate-block
+    /// Resolve a bare identifier or the storage `blk[1].sig` names (see
+    /// `sva_fold_scopes`): a member chain needs a select, every select a constant (a generate-block
     /// or instance-array index fixed at elaboration), and it names a signal
     /// or an unpacked array. A variable index (`a[i].f`) is evaluated at
     /// every tick, so folding it would freeze the element it picked.
     pub(super) fn sva_scope_name(&self, e: &Expression) -> Option<String> {
-        let chain = Self::member_chain_as_hier_ident(e)?;
-        let ExprKind::Ident(h) = &chain.kind else {
-            return None;
+        let path = if let ExprKind::Ident(h) = &e.kind {
+            if h.root.is_some() || h.path.len() != 1 || !h.path[0].selects.is_empty() {
+                return None;
+            }
+            h.path[0].name.name.clone()
+        } else {
+            let chain = Self::member_chain_as_hier_ident(e)?;
+            let ExprKind::Ident(h) = &chain.kind else {
+                return None;
+            };
+            let mut sels = h.path.iter().flat_map(|s| &s.selects).peekable();
+            if sels.peek().is_none()
+                || !sels.all(|x| super::elaborate::const_eval_i64_with_params(x, None).is_some())
+            {
+                return None;
+            }
+            let flat = self.member_chain_ident(e)?;
+            let ExprKind::Ident(h) = &flat.kind else {
+                return None;
+            };
+            h.path
+                .iter()
+                .map(|s| s.name.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
         };
-        let mut sels = h.path.iter().flat_map(|s| &s.selects).peekable();
-        if sels.peek().is_none()
-            || !sels.all(|x| super::elaborate::const_eval_i64_with_params(x, None).is_some())
-        {
-            return None;
-        }
-        let flat = self.member_chain_ident(e)?;
-        let ExprKind::Ident(h) = &flat.kind else {
-            return None;
-        };
-        let path = h
-            .path
-            .iter()
-            .map(|s| s.name.name.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        // §23.8: the name is looked up in the assertion's scope, then in each
-        // enclosing one (`cg[1].y` in instance `c` is `c.cg[1].y`).
+        // §23.8: search the assertion's scope, then each enclosing scope.
         let scope = self.active_instance_scope();
         let mut up = scope.as_str();
         loop {
@@ -200,7 +229,65 @@ impl Simulator {
         }
     }
 
-    pub(super) fn sva_expand_named(&self, e: &Expression, depth: u32) -> Expression {
+    /// §16.8/§16.12: substitute supported defaults in both assertion binders.
+    pub(super) fn sva_bind_named(&self, name: &str, args: &[Expression]) -> Option<Expression> {
+        let body = self.module.property_decls.get(name)?;
+        let formals = self
+            .module
+            .property_params
+            .get(name)
+            .map_or(&[][..], Vec::as_slice);
+        let defaults = self.module.property_defaults.get(name);
+        // Keep the existing path for supplied named actuals (whose formal types
+        // are not retained), or when any omitted default cannot be represented.
+        // In particular, do not partially substitute an unsupported declaration.
+        let use_defaults = defaults.is_some_and(|d| {
+            !args
+                .iter()
+                .any(|a| matches!(a.kind, ExprKind::NamedArg { expr: Some(_), .. }))
+                && formals
+                    .iter()
+                    .enumerate()
+                    .all(|(i, f)| match args.get(i).map(|a| &a.kind) {
+                        None | Some(ExprKind::Empty | ExprKind::NamedArg { expr: None, .. }) => {
+                            d.contains_key(f)
+                        }
+                        _ => true,
+                    })
+        });
+        let mut map = HashMap::default();
+        for (i, formal) in formals.iter().enumerate() {
+            let actual = args.get(i).filter(|a| {
+                !(use_defaults
+                    && matches!(
+                        a.kind,
+                        ExprKind::Empty | ExprKind::NamedArg { expr: None, .. }
+                    ))
+            });
+            if let Some(actual) = actual {
+                map.insert(formal.clone(), actual.clone());
+            } else if use_defaults && let Some(default) = defaults.and_then(|d| d.get(formal)) {
+                map.insert(formal.clone(), default.clone());
+            }
+        }
+        if map.is_empty() {
+            return Some(body.clone());
+        }
+        Some(super::elaborate::rewrite_expr(
+            body,
+            "",
+            &map,
+            &std::collections::HashSet::new(),
+            &HashMap::default(),
+        ))
+    }
+
+    pub(super) fn sva_expand_named(
+        &self,
+        e: &Expression,
+        depth: u32,
+        locals: &HashSet<String>,
+    ) -> Expression {
         if depth > 16 {
             return e.clone();
         }
@@ -208,15 +295,20 @@ impl Simulator {
             ExprKind::Ident(h) if h.path.len() == 1 && h.path[0].selects.is_empty() => {
                 let name = h.path[0].name.name.as_str();
                 if self.module.sequences.contains(name)
-                    && self
-                        .module
-                        .property_params
-                        .get(name)
-                        .map_or(true, |p| p.is_empty())
+                    && !locals.contains(name)
+                    && self.sva_scope_name(e).is_none()
+                    && self.module.property_params.get(name).map_or(true, |p| {
+                        p.is_empty()
+                            || self
+                                .module
+                                .property_defaults
+                                .get(name)
+                                .is_some_and(|d| d.len() == p.len())
+                    })
                 {
-                    if let Some(body) = self.module.property_decls.get(name) {
-                        let inner = Self::sva_unclocked(body);
-                        return self.sva_expand_named(&inner, depth + 1);
+                    if let Some(body) = self.sva_bind_named(name, &[]) {
+                        let inner = Self::sva_unclocked(&body);
+                        return self.sva_expand_named(&inner, depth + 1, locals);
                     }
                 }
                 e.clone()
@@ -231,28 +323,9 @@ impl Simulator {
                     _ => None,
                 };
                 if let Some(name) = name {
-                    if let Some(body) = self.module.property_decls.get(&name).cloned() {
-                        let formals = self
-                            .module
-                            .property_params
-                            .get(&name)
-                            .cloned()
-                            .unwrap_or_default();
-                        let mut map: HashMap<String, Expression> = HashMap::default();
-                        for (i, f) in formals.iter().enumerate() {
-                            if let Some(actual) = args.get(i) {
-                                map.insert(f.clone(), actual.clone());
-                            }
-                        }
-                        let body = super::elaborate::rewrite_expr(
-                            &body,
-                            "",
-                            &map,
-                            &std::collections::HashSet::new(),
-                            &HashMap::default(),
-                        );
+                    if let Some(body) = self.sva_bind_named(&name, args) {
                         let inner = Self::sva_unclocked(&body);
-                        return self.sva_expand_named(&inner, depth + 1);
+                        return self.sva_expand_named(&inner, depth + 1, locals);
                     }
                 }
                 Expression::new(
@@ -260,8 +333,34 @@ impl Simulator {
                         func: func.clone(),
                         args: args
                             .iter()
-                            .map(|a| self.sva_expand_named(a, depth))
+                            .map(|a| self.sva_expand_named(a, depth, locals))
                             .collect(),
+                    },
+                    e.span,
+                )
+            }
+            // §16.10: collect local names before expanding the enclosed body.
+            ExprKind::SystemCall { name, args } if name == "$sva_locals" => {
+                let mut scope = locals.clone();
+                for decl in args.iter().take(args.len().saturating_sub(1)) {
+                    if let ExprKind::SystemCall { args, .. } = &decl.kind
+                        && let Some(Expression {
+                            kind: ExprKind::Ident(h),
+                            ..
+                        }) = args.get(1)
+                        && let Some(seg) = h.path.last()
+                    {
+                        scope.insert(seg.name.name.clone());
+                    }
+                }
+                let mut expanded = args.clone();
+                if let Some(body) = expanded.last_mut() {
+                    *body = self.sva_expand_named(body, depth, &scope);
+                }
+                Expression::new(
+                    ExprKind::SystemCall {
+                        name: name.clone(),
+                        args: expanded,
                     },
                     e.span,
                 )
@@ -271,7 +370,7 @@ impl Simulator {
                     name: name.clone(),
                     args: args
                         .iter()
-                        .map(|a| self.sva_expand_named(a, depth))
+                        .map(|a| self.sva_expand_named(a, depth, locals))
                         .collect(),
                 },
                 e.span,
@@ -279,20 +378,20 @@ impl Simulator {
             ExprKind::Binary { op, left, right } => Expression::new(
                 ExprKind::Binary {
                     op: op.clone(),
-                    left: Box::new(self.sva_expand_named(left, depth)),
-                    right: Box::new(self.sva_expand_named(right, depth)),
+                    left: Box::new(self.sva_expand_named(left, depth, locals)),
+                    right: Box::new(self.sva_expand_named(right, depth, locals)),
                 },
                 e.span,
             ),
             ExprKind::Unary { op, operand } => Expression::new(
                 ExprKind::Unary {
                     op: op.clone(),
-                    operand: Box::new(self.sva_expand_named(operand, depth)),
+                    operand: Box::new(self.sva_expand_named(operand, depth, locals)),
                 },
                 e.span,
             ),
             ExprKind::Paren(inner) => Expression::new(
-                ExprKind::Paren(Box::new(self.sva_expand_named(inner, depth))),
+                ExprKind::Paren(Box::new(self.sva_expand_named(inner, depth, locals))),
                 e.span,
             ),
             _ => e.clone(),
@@ -1900,7 +1999,7 @@ impl Simulator {
         };
         // Named sequence / property instances INSIDE the body (`a |=> s`)
         // expand here, once.
-        let mut body_expanded = self.sva_expand_named(&body, 0);
+        let mut body_expanded = self.sva_expand_named(&body, 0, &HashSet::default());
         self.sva_fold_scopes(&mut body_expanded);
         let mut lv_init: Vec<Value> = Vec::new();
         let mut lv_types =
