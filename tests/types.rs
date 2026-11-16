@@ -726,6 +726,10 @@ mod unpacked_slice_patterns_1045;
 
 #[path = "types/package_nettype_import.rs"]
 mod package_nettype_import;
+#[path = "types/array_member_type_keys.rs"]
+mod array_member_type_keys;
+#[path = "types/array_member_mixed_type_keys.rs"]
+mod array_member_mixed_type_keys;
 #[path = "types/struct_pattern_keys_continuous_assign.rs"]
 mod struct_pattern_keys_continuous_assign;
 #[path = "types/ansi_port_inheritance_1078.rs"]
