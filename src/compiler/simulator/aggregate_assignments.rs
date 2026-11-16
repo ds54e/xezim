@@ -1151,6 +1151,8 @@ impl Simulator {
             return;
         }
         let mut per_elem: Vec<Option<&Expression>> = vec![None; first.len()];
+        let mut typed: Option<&Expression> = None;
+        let mut unhandled_type_key = false;
         let mut dflt: Option<&Expression> = None;
         let mut pos = 0usize;
         for item in sub {
@@ -1161,8 +1163,26 @@ impl Simulator {
                     }
                     pos += 1;
                 }
+                // dt describes the leaf, not a remaining unpacked subarray.
+                // Typedef keys need scope-aware lookup (§6.22.1); leave them
+                // on the existing path until the shared resolver supplies it.
+                AssignmentPatternItem::Typed(key_dt, v) => {
+                    if matches!(
+                        key_dt,
+                        DataType::TypeReference { .. }
+                            | DataType::Real {
+                                kind: crate::ast::types::RealType::RealTime,
+                                ..
+                            }
+                    ) {
+                        unhandled_type_key = true;
+                    } else if rest.is_empty() && self.pattern_type_matches(dt, key_dt) {
+                        typed = Some(v);
+                    }
+                }
                 AssignmentPatternItem::Keyed(_, _) | AssignmentPatternItem::Named(_, _) => {
                     let Some(k) = self.array_pattern_key(item) else {
+                        unhandled_type_key = true;
                         continue;
                     };
                     if let Some(key) = self.eval_expr(&k).to_i64() {
@@ -1172,11 +1192,18 @@ impl Simulator {
                     }
                 }
                 AssignmentPatternItem::Default(v) => dflt = Some(v),
-                _ => {}
             }
         }
+        // §10.9.1: the last matching type wins. If any type key is left
+        // unhandled, retain the original path for the whole dimension;
+        // otherwise an earlier built-in key could hide its correct value.
+        if unhandled_type_key {
+            typed = None;
+        }
         for (p, idx) in first.iter().enumerate() {
-            if let Some(v) = per_elem[p].or(dflt) {
+            // IEEE 1800-2023 §10.9.1/§10.9.2: explicit indices precede
+            // the last matching type key, which precedes the default.
+            if let Some(v) = per_elem[p].or(typed).or(dflt) {
                 self.assign_pattern_over_dims(&format!("{}[{}]", target, idx), dt, rest, v);
             }
         }
