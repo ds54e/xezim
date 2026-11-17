@@ -120,3 +120,5 @@ mod ascending_udp_port_1201;
 mod delayed_slice_ownership_1215;
 #[path = "gates/parameter_wave_scope_1213.rs"]
 mod parameter_wave_scope_1213;
+#[path = "gates/udp_delay_timeunit.rs"]
+mod udp_delay_timeunit;
