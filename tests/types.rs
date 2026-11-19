@@ -797,3 +797,5 @@ mod nettype_declaration_initializer_drivers;
 mod unsized_decimal_width_1120;
 #[path = "types/negative_bound_packed_slice_write_1193.rs"]
 mod negative_bound_packed_slice_write_1193;
+#[path = "types/pattern_type_key_last_match_1290.rs"]
+mod pattern_type_key_last_match_1290;
