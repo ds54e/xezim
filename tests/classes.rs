@@ -388,6 +388,8 @@ mod covergroup_real_bins;
 mod covergroup_sample_args;
 #[path = "classes/covergroup_sampling_event.rs"]
 mod covergroup_sampling_event;
+#[path = "classes/covergroup_tolerance_ranges.rs"]
+mod covergroup_tolerance_ranges;
 #[path = "classes/factory_run_test.rs"]
 mod factory_run_test;
 #[path = "classes/factory_typedef_chain.rs"]
