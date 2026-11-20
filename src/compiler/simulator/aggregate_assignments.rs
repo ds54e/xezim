@@ -2993,46 +2993,54 @@ impl Simulator {
     /// or an arithmetic/conditional operator over such an operand. Mirrors
     /// the bytecode compiler's `expr_is_real_static`; a shape it cannot type
     /// answers false and keeps the integral rules.
-    pub(super) fn expr_is_real_static(&mut self, e: &Expression) -> bool {
+    pub(super) fn expr_is_real_static(&self, e: &Expression) -> bool {
+        Self::expr_is_real_with(e, &|h| {
+            if h.path.len() == 1
+                && h.root.is_none()
+                && let Some(v) = self
+                    .local_stack
+                    .last()
+                    .and_then(|m| m.get(&h.path[0].name.name))
+            {
+                return v.is_real;
+            }
+            let n = self.resolve_hier_name(h);
+            self.lookup_signal_real(&n)
+        })
+    }
+
+    pub(super) fn expr_is_real_with(
+        e: &Expression,
+        ident_is_real: &impl Fn(&HierarchicalIdentifier) -> bool,
+    ) -> bool {
         // Every real-typed expression is 64 bits wide, so a node whose STATIC
         // width is already known to be anything else is integral — the
         // common case, answered without a walk or a name lookup.
         if e.cached_width.get().is_some_and(|w| w != 64) {
             return false;
         }
+        let is_real = |e| Self::expr_is_real_with(e, ident_is_real);
         match &e.kind {
             ExprKind::Number(n) => matches!(
                 n,
                 crate::ast::expr::NumberLiteral::Real(_) | crate::ast::expr::NumberLiteral::Time(_)
             ),
-            ExprKind::Ident(h) => {
-                if h.path.len() == 1
-                    && h.root.is_none()
-                    && let Some(v) = self
-                        .local_stack
-                        .last()
-                        .and_then(|m| m.get(&h.path[0].name.name))
-                {
-                    return v.is_real;
-                }
-                let n = self.resolve_hier_name(h);
-                self.lookup_signal_real(&n)
-            }
-            ExprKind::Paren(x) => self.expr_is_real_static(x),
+            ExprKind::Ident(h) => ident_is_real(h),
+            ExprKind::Paren(x) => is_real(x),
             ExprKind::Unary {
                 op: UnaryOp::Plus | UnaryOp::Minus,
                 operand,
-            } => self.expr_is_real_static(operand),
+            } => is_real(operand),
             ExprKind::Binary {
                 op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Power,
                 left,
                 right,
-            } => self.expr_is_real_static(left) || self.expr_is_real_static(right),
+            } => is_real(left) || is_real(right),
             ExprKind::Conditional {
                 then_expr,
                 else_expr,
                 ..
-            } => self.expr_is_real_static(then_expr) || self.expr_is_real_static(else_expr),
+            } => is_real(then_expr) || is_real(else_expr),
             ExprKind::SystemCall { name, args } => match name.as_str() {
                 "$__xz_type_cast" => matches!(
                     args.first().map(|a| &a.kind),

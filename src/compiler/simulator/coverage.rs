@@ -1,6 +1,8 @@
 //! Simulator coverage.
 
+use super::elaborate::{ParamEnv, ParamLookup};
 use super::*;
+use crate::ast::decl::{CoverBinKind, Coverpoint};
 
 impl Simulator {
     /// The covergroup definition `new` instantiates for a type name: inside
@@ -572,8 +574,17 @@ impl Simulator {
         };
         let mut total_weight = 0.0f64;
         let mut coverage_sum = 0.0f64;
+        let mut empty_real = false;
         for item in &def.items {
             if let Some((covered, total, weight)) = self.cg_item_counts(def, item, insts) {
+                if total == 0
+                    && let CovergroupItem::Coverpoint(cp) = item
+                    && Self::cg_scalar_real_bins(cp)
+                    && self.cg_point_is_real(def, cp, insts, &Self::cg_point_name(cp))
+                {
+                    empty_real = true;
+                    continue;
+                }
                 total_weight += weight;
                 coverage_sum += Self::cg_fraction(covered, total) * weight;
             }
@@ -585,6 +596,15 @@ impl Simulator {
             coverage_sum += Self::cg_fraction(covered, total);
         }
         if total_weight == 0.0 {
+            if empty_real {
+                let scope = insts
+                    .first()
+                    .map(|i| Self::cg_bin_scope(i))
+                    .unwrap_or_default();
+                if self.cg_option_i64(def, &[], "weight", &scope).unwrap_or(1) != 0 {
+                    return 0.0;
+                }
+            }
             100.0
         } else {
             (coverage_sum / total_weight) * 100.0
@@ -642,20 +662,194 @@ impl Simulator {
         Some((v as u64 / group).min(nbins.saturating_sub(1)))
     }
 
+    fn cg_first_sample<'a>(name: &str, insts: &[&'a CovergroupInstance]) -> Option<&'a Value> {
+        insts
+            .iter()
+            .filter_map(|i| i.point_hits.get(name))
+            .flat_map(|h| h.keys())
+            .next()
+    }
+
     /// Width of the values sampled for `name`, else `hint`, else 1.
     pub(super) fn cg_sampled_width(
         name: &str,
         insts: &[&CovergroupInstance],
         hint: Option<u32>,
     ) -> u32 {
-        insts
-            .iter()
-            .filter_map(|i| i.point_hits.get(name))
-            .flat_map(|h| h.keys())
-            .next()
+        Self::cg_first_sample(name, insts)
             .map(|v| v.width)
             .or(hint)
             .unwrap_or(1)
+    }
+
+    fn cg_point_is_real(
+        &self,
+        def: &CovergroupDeclaration,
+        cp: &Coverpoint,
+        insts: &[&CovergroupInstance],
+        name: &str,
+    ) -> bool {
+        self.cg_expr_is_real(
+            def,
+            cp,
+            Self::cg_first_sample(name, insts),
+            insts.first().and_then(|i| i.owner),
+        )
+    }
+
+    fn cg_expr_is_real(
+        &self,
+        def: &CovergroupDeclaration,
+        cp: &Coverpoint,
+        sampled: Option<&Value>,
+        owner: Option<usize>,
+    ) -> bool {
+        if let Some(v) = sampled
+            && def.ports.is_empty()
+            && def.sample_ports.is_empty()
+        {
+            return v.is_real;
+        }
+        // The formal's type applies even if the actual arrived with a
+        // different Value tag. Before sampling, use the declaration's scope.
+        let uses_formal = std::cell::Cell::new(false);
+        let declared_real = Self::expr_is_real_with(&cp.expr, &|h| {
+            let key = Self::resolve_hier_name_static(h, &self.module);
+            if let Some(port) = def
+                .sample_ports
+                .iter()
+                .chain(&def.ports)
+                .find(|p| p.name.name == key)
+            {
+                uses_formal.set(true);
+                return super::elaborate::is_type_real_resolved(
+                    &port.data_type,
+                    &self.module.typedef_types,
+                );
+            }
+            if let Some(v) = owner.and_then(|h| self.read_member_value(h, &key)) {
+                return v.is_real;
+            }
+            self.lookup_signal_real(&key)
+                || self.module.parameters.get(&key).is_some_and(|v| v.is_real)
+        }) || self.call_returns_real(&cp.expr);
+        if uses_formal.get() {
+            declared_real
+        } else {
+            sampled.map_or(declared_real, |v| v.is_real)
+        }
+    }
+
+    fn cg_scalar_real_bins(cp: &Coverpoint) -> bool {
+        cp.bins.iter().all(|b| {
+            !b.array_form
+                && !b.is_wildcard
+                && b.with_filter.is_none()
+                && b.transitions.is_empty()
+                && (!b.values.is_empty() || b.kind == CoverBinKind::Default)
+        })
+    }
+
+    /// §19.5.1, §11.4.13: closed real intervals, including singleton
+    /// values. The unbounded endpoint stands for the type's extremum.
+    fn cg_real_range(
+        range: &ConstraintRange,
+        mut eval: impl FnMut(&Expression) -> Option<f64>,
+    ) -> Option<(f64, f64)> {
+        let mut bound = |e: &Expression, end| {
+            if matches!(e.kind, ExprKind::Dollar) {
+                Some(end)
+            } else {
+                eval(e)
+            }
+        };
+        match range {
+            ConstraintRange::Value(e) => eval(e).map(|v| (v, v)),
+            ConstraintRange::Range { lo, hi } => Some((bound(lo, f64::MIN)?, bound(hi, f64::MAX)?)),
+        }
+    }
+
+    /// §19.11.1: real bins whose ranges are empty or wholly excluded do
+    /// not contribute to coverage. Decline when a bound cannot be folded.
+    fn cg_real_shape(
+        &self,
+        cp: &Coverpoint,
+        name: &str,
+        instance: Option<&CovergroupInstance>,
+        ctor: &[(String, Value)],
+    ) -> Option<CpShape> {
+        let explicit = cp.bins.iter().filter(|b| b.kind == CoverBinKind::Bins);
+        let mut bins = Vec::new();
+        if explicit.clone().next().is_none() {
+            // §19.5: real points have no automatic bins, including when
+            // their only explicit bin is default.
+            return Some(CpShape {
+                bins,
+                auto: None,
+                excl: Vec::new(),
+            });
+        }
+        let top = ctor.iter().cloned().collect();
+        let params = ParamEnv::Overlay {
+            base: &self.module.parameters,
+            top: &top,
+        };
+        let bounds = |r: &ConstraintRange| {
+            Self::cg_real_range(r, |e| {
+                // Fold only known constants. The evaluator otherwise defaults
+                // an unresolved name to zero, which could remove a live bin.
+                let mut known = Self::const_fold_shape(e);
+                super::elaborate::for_each_sub_expr(e, &mut |e| match &e.kind {
+                    ExprKind::Ident(h) => {
+                        known &= matches!(h.path.as_slice(), [n] if h.root.is_none()
+                            && params.contains_key(&n.name.name)
+                            && (top.contains_key(&n.name.name) || instance.and_then(|i| i.owner).is_none()));
+                    }
+                    ExprKind::Number(NumberLiteral::Time(_)) => known = false,
+                    _ => {}
+                });
+                let v = known.then(|| super::elaborate::eval_const_expr_val_env(e, &params))?;
+                (!v.has_xz()).then(|| v.to_f64())
+            })
+        };
+        let mut excluded: Vec<_> = cp
+            .bins
+            .iter()
+            .filter(|b| matches!(b.kind, CoverBinKind::Ignore | CoverBinKind::Illegal))
+            .flat_map(|b| b.values.iter().map(bounds))
+            .collect::<Option<_>>()?;
+        excluded.retain(|(l, h)| l <= h);
+        excluded.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let has_value = |(mut lo, hi): (f64, f64)| {
+            for &(l, h) in &excluded {
+                if l > lo {
+                    break;
+                }
+                if h >= hi {
+                    return false;
+                }
+                lo = lo.max(h.next_up());
+            }
+            lo <= hi
+        };
+        for bin in explicit {
+            let live = bin
+                .values
+                .iter()
+                .try_fold(false, |live, r| Some(has_value(bounds(r)?) || live))?;
+            if live {
+                bins.push(CgBin {
+                    key: Some(format!("{}.{}", name, bin.name.name)),
+                    name: bin.name.name.clone(),
+                    ranges: Vec::new(),
+                });
+            }
+        }
+        Some(CpShape {
+            bins,
+            auto: None,
+            excl: Vec::new(),
+        })
     }
 
     /// Covered and total automatic bins of an implicit coverpoint (§19.6).
@@ -1150,7 +1344,11 @@ impl Simulator {
             CovergroupItem::Coverpoint(cp) => {
                 let at_least = self.cg_at_least(def, &cp.options, insts);
                 let cp_name = Self::cg_point_name(cp);
-                let shape = self.cg_point_shape(def, cp, insts, None);
+                let shape = (self.cg_point_is_real(def, cp, insts, &cp_name)
+                    && Self::cg_scalar_real_bins(cp))
+                .then(|| self.cg_real_shape(cp, &cp_name, insts.first().copied(), ctor))
+                .flatten()
+                .unwrap_or_else(|| self.cg_point_shape(def, cp, insts, None));
                 let hits = Self::cg_shape_hits(&cp_name, &shape, insts);
                 let covered = hits.iter().filter(|&&c| c >= at_least).count() as u64;
                 // §19.7 option.weight (default 1) weights this coverpoint in
@@ -2103,23 +2301,35 @@ impl Simulator {
                     }
                     let val = self.eval_expr(&cp.expr);
                     let cp_name = Self::cg_point_name(cp);
-                    let vi: Option<i64> = if val.has_xz() { None } else { val.to_i64() };
-                    let ctor: Vec<(String, Value)> = self
-                        .cg_heap
-                        .get(handle)
-                        .and_then(|x| x.as_ref())
-                        .map(|i| Self::cg_bin_scope(i).into_owned())
-                        .unwrap_or_default();
+                    let owner = self.this_stack.last().copied().flatten();
+                    let real = (self.cg_expr_is_real(&def, cp, Some(&val), owner)
+                        && Self::cg_scalar_real_bins(cp))
+                    .then(|| val.to_f64());
+                    let vi = if real.is_none() && !val.has_xz() {
+                        val.to_i64()
+                    } else {
+                        None
+                    };
+                    let ctor = if real.is_none() {
+                        self.cg_heap
+                            .get(handle)
+                            .and_then(|x| x.as_ref())
+                            .map(|i| Self::cg_bin_scope(i).into_owned())
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     // §19.5.6/§19.5.7: an ignored or illegal value is in no
                     // other bin.
-                    let has_excl = cp.bins.iter().any(|b| {
-                        matches!(
-                            b.kind,
-                            crate::ast::decl::CoverBinKind::Ignore
-                                | crate::ast::decl::CoverBinKind::Illegal
-                        )
-                    });
-                    let excluded = has_excl
+                    let has_excl = real.is_none()
+                        && cp.bins.iter().any(|b| {
+                            matches!(
+                                b.kind,
+                                crate::ast::decl::CoverBinKind::Ignore
+                                    | crate::ast::decl::CoverBinKind::Illegal
+                            )
+                        });
+                    let mut excluded = has_excl
                         && vi.is_some_and(|v| {
                             Self::cg_in_ranges(v, &self.cg_excluded_ranges(cp, &ctor))
                         });
@@ -2138,7 +2348,15 @@ impl Simulator {
                         if !bin.transitions.is_empty() {
                             continue;
                         }
-                        let matched = if bin.is_wildcard {
+                        let matched = if let Some(v) = real {
+                            bin.values.iter().any(|r| {
+                                Self::cg_real_range(r, |e| {
+                                    let bound = self.eval_expr(e);
+                                    (!bound.has_xz()).then(|| bound.to_f64())
+                                })
+                                .is_some_and(|(lo, hi)| (lo..=hi).contains(&v))
+                            })
+                        } else if bin.is_wildcard {
                             // LRM §19.5 wildcard match: bit-wise compare with
                             // the bin pattern; pattern bits that are X/Z/?
                             // are don't-cares.
@@ -2164,6 +2382,7 @@ impl Simulator {
                             continue;
                         }
                         any_value_match = true;
+                        excluded |= real.is_some() && bin.kind != CoverBinKind::Bins;
                         // §19.5: a bin's own `iff` guard keeps it from
                         // counting while false (#605); the value still
                         // belongs to it, so no `default` bin takes it.
@@ -2181,7 +2400,10 @@ impl Simulator {
                             _ => {}
                         }
                     }
-                    if !any_value_match {
+                    if real.is_some() && excluded {
+                        // A later exclusion can overlap an earlier state bin.
+                        bin_increments.clear();
+                    } else if !any_value_match {
                         bin_increments.extend(default_bin_keys);
                     }
                     for (key, kind) in self.cg_step_transitions(handle, cp, &cp_name, vi, &ctor) {
@@ -2192,7 +2414,9 @@ impl Simulator {
                         }
                     }
                     for key in &illegal_hits {
-                        self.cg_illegal_hit(&cg_name, key, &Self::cg_value_text(&val));
+                        let text =
+                            real.map_or_else(|| Self::cg_value_text(&val), |v| v.to_string());
+                        self.cg_illegal_hit(&cg_name, key, &text);
                     }
                     if let Some(Some(inst)) = self.cg_heap.get_mut(handle) {
                         *inst
