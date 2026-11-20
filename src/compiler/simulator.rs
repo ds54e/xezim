@@ -9892,6 +9892,9 @@ pub struct Simulator {
     /// `covergroup_def_for`).
     #[serde(skip)]
     covergroup_leaf_names: std::cell::OnceCell<HashSet<String>>,
+    /// Sampling decisions indexed by item in each covergroup definition with formals.
+    #[serde(skip)]
+    cg_point_sampling: HashMap<String, Arc<[coverage::CgPointSampling]>>,
     /// Class -> the `string_properties` of it and its ancestors, in chain
     /// order (a method call marks them in `string_signals`).
     class_string_props: std::cell::RefCell<HashMap<String, std::rc::Rc<Vec<String>>>>,

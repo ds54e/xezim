@@ -18,6 +18,8 @@ module top;
     // §19.5 and §19.5.3: a default bin is an explicit catch-all and
     // contributes no bins to the coverage computation.
     fallback: coverpoint x { bins other = default; }
+    // §19.11.1 c–d: a zero-weight point reports 100% and zero counts.
+    unweighted: coverpoint x { option.weight = 0; bins other = default; }
   endgroup
   cg g;
 
@@ -40,6 +42,8 @@ module top;
     g = new;
     pct = g.fallback.get_inst_coverage(hit, total);
     $display("default before %0.0f %0d/%0d", pct, hit, total);
+    pct = g.unweighted.get_inst_coverage(hit, total);
+    $display("unweighted before %0.0f %0d/%0d", pct, hit, total);
     sample_at(0.5, 1);
     sample_at(2.5, 1);
     sample_at(1.5, 1);
@@ -47,5 +51,7 @@ module top;
     sample_at(4.5, 1);
     pct = g.fallback.get_inst_coverage(hit, total);
     $display("default after %0.0f %0d/%0d", pct, hit, total);
+    pct = g.unweighted.get_coverage(hit, total);
+    $display("unweighted after %0.0f %0d/%0d", pct, hit, total);
   end
 endmodule

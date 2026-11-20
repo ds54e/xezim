@@ -4,6 +4,14 @@ use super::elaborate::{ParamEnv, ParamLookup};
 use super::*;
 use crate::ast::decl::{CoverBinKind, Coverpoint};
 
+#[derive(Clone, Copy)]
+pub(super) enum CgPointSampling {
+    Integral,
+    SampledType,
+    FormalType(bool),
+    Scoped,
+}
+
 impl Simulator {
     /// The covergroup definition `new` instantiates for a type name: inside
     /// a class, the class's OWN `Class::cg` (walking `extends`) wins over
@@ -284,9 +292,7 @@ impl Simulator {
         let cg_name = inst.cg_name.clone();
         // With `merge_instances` an instance reports its type's coverage.
         if method == "get_inst_coverage" && !self.cg_merge_instances(&cg_name) {
-            return self
-                .cg_named_item_counts(&cg_name, item, &[inst])
-                .map(|(c, t)| (Self::cg_fraction(c, t) * 100.0, c, t));
+            return self.cg_named_item_coverage(&cg_name, item, &[inst]);
         }
         self.cg_type_item_counts(&cg_name, item)
     }
@@ -306,13 +312,13 @@ impl Simulator {
     pub(super) fn cg_type_item_counts(&self, cg_name: &str, item: &str) -> Option<(f64, u64, u64)> {
         let insts = self.cg_type_instances(cg_name);
         if self.cg_merge_instances(cg_name) || insts.is_empty() {
-            let (c, t) = self.cg_named_item_counts(cg_name, item, &insts)?;
-            return Some((Self::cg_fraction(c, t) * 100.0, c, t));
+            return self.cg_named_item_coverage(cg_name, item, &insts);
         }
         let (mut pct, mut c, mut t) = (0.0, 0, 0);
         for i in &insts {
-            let (ic, it) = self.cg_named_item_counts(cg_name, item, std::slice::from_ref(i))?;
-            pct += Self::cg_fraction(ic, it) * 100.0;
+            let (ip, ic, it) =
+                self.cg_named_item_coverage(cg_name, item, std::slice::from_ref(i))?;
+            pct += ip;
             c += ic;
             t += it;
         }
@@ -713,30 +719,76 @@ impl Simulator {
         // The formal's type applies even if the actual arrived with a
         // different Value tag. Before sampling, use the declaration's scope.
         let uses_formal = std::cell::Cell::new(false);
-        let declared_real = Self::expr_is_real_with(&cp.expr, &|h| {
-            let key = Self::resolve_hier_name_static(h, &self.module);
-            if let Some(port) = def
-                .sample_ports
-                .iter()
-                .chain(&def.ports)
-                .find(|p| p.name.name == key)
-            {
-                uses_formal.set(true);
-                return super::elaborate::is_type_real_resolved(
-                    &port.data_type,
-                    &self.module.typedef_types,
-                );
-            }
-            if let Some(v) = owner.and_then(|h| self.read_member_value(h, &key)) {
-                return v.is_real;
-            }
-            self.lookup_signal_real(&key)
-                || self.module.parameters.get(&key).is_some_and(|v| v.is_real)
-        }) || self.call_returns_real(&cp.expr);
+        let declared_real = Self::expr_is_real_with(
+            &cp.expr,
+            &|h| {
+                let key = Self::resolve_hier_name_static(h, &self.module);
+                if let Some(real) = self.cg_formal_is_real(def, &key) {
+                    uses_formal.set(true);
+                    return real;
+                }
+                if let Some(v) = owner.and_then(|h| self.read_member_value(h, &key)) {
+                    return v.is_real;
+                }
+                self.lookup_signal_real(&key)
+                    || self.module.parameters.get(&key).is_some_and(|v| v.is_real)
+            },
+            &|name, args| self.real_system_call(name, args),
+        ) || self.call_returns_real(&cp.expr);
         if uses_formal.get() {
             declared_real
         } else {
             sampled.map_or(declared_real, |v| v.is_real)
+        }
+    }
+
+    fn cg_formal_is_real(&self, def: &CovergroupDeclaration, name: &str) -> Option<bool> {
+        def.sample_ports
+            .iter()
+            .chain(&def.ports)
+            .find(|port| port.name.name == name)
+            .map(|port| {
+                super::elaborate::is_type_real_resolved(&port.data_type, &self.module.typedef_types)
+            })
+    }
+
+    fn cg_declared_sampling(
+        &self,
+        def: &CovergroupDeclaration,
+        cp: &Coverpoint,
+    ) -> CgPointSampling {
+        if !Self::cg_scalar_real_bins(cp) {
+            return CgPointSampling::Integral;
+        }
+        let uses_formal = std::cell::Cell::new(false);
+        let uses_scope = std::cell::Cell::new(false);
+        // The walk combines real operands with short-circuit OR. Treating
+        // scoped operands as integral visits every formal they could hide.
+        let declared_real = Self::expr_is_real_with(
+            &cp.expr,
+            &|h| {
+                let key = Self::resolve_hier_name_static(h, &self.module);
+                if let Some(real) = self.cg_formal_is_real(def, &key) {
+                    uses_formal.set(true);
+                    real
+                } else {
+                    uses_scope.set(true);
+                    false
+                }
+            },
+            &|name, _| {
+                if matches!(name, "$__xz_type_cast" | "$__xz_named_cast") {
+                    uses_scope.set(true);
+                    false
+                } else {
+                    super::super::bytecode::system_function_is_real(name)
+                }
+            },
+        );
+        match (uses_formal.get(), uses_scope.get()) {
+            (false, _) => CgPointSampling::SampledType,
+            (true, false) => CgPointSampling::FormalType(declared_real),
+            (true, true) => CgPointSampling::Scoped,
         }
     }
 
@@ -874,13 +926,13 @@ impl Simulator {
         (covered, shape.2)
     }
 
-    /// Covered and total bins of ONE coverpoint or cross.
-    pub(super) fn cg_named_item_counts(
+    /// Coverage percentage and bin counts of one coverpoint or cross.
+    fn cg_named_item_coverage(
         &self,
         cg_name: &str,
         item_name: &str,
         insts: &[&CovergroupInstance],
-    ) -> Option<(u64, u64)> {
+    ) -> Option<(f64, u64, u64)> {
         let def = self.module.covergroups.get(cg_name)?;
         let item = def.items.iter().find(|it| match it {
             CovergroupItem::Coverpoint(cp) => cp.name.as_ref().is_some_and(|n| n.name == item_name),
@@ -888,12 +940,25 @@ impl Simulator {
             _ => false,
         });
         match item {
-            Some(item) => self
-                .cg_item_counts(def, item, insts)
-                .map(|(c, t, _)| (c, t)),
+            Some(item) => {
+                let (c, t, weight) = self.cg_item_counts(def, item, insts)?;
+                // §19.11.1 c): a zero-weight real point with no counted bins.
+                let pct = if t == 0
+                    && weight == 0.0
+                    && let CovergroupItem::Coverpoint(cp) = item
+                    && Self::cg_scalar_real_bins(cp)
+                    && self.cg_point_is_real(def, cp, insts, item_name)
+                {
+                    100.0
+                } else {
+                    Self::cg_fraction(c, t) * 100.0
+                };
+                Some((pct, c, t))
+            }
             None if Self::cg_implicit_points(def).iter().any(|n| n == item_name) => {
                 let at_least = self.cg_at_least(def, &[], insts);
-                Some(Self::cg_implicit_point_counts(item_name, insts, at_least))
+                let (c, t) = Self::cg_implicit_point_counts(item_name, insts, at_least);
+                Some((Self::cg_fraction(c, t) * 100.0, c, t))
             }
             None => None,
         }
@@ -2278,7 +2343,29 @@ impl Simulator {
             .and_then(|x| x.as_ref())
             .map(|i| i.stopped_items.clone())
             .unwrap_or_default();
-        for item in &def.items {
+        let sampling = if def.ports.is_empty() && def.sample_ports.is_empty() {
+            None
+        } else {
+            let sampling = self
+                .cg_point_sampling
+                .get(&cg_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let sampling: Arc<[_]> = def
+                        .items
+                        .iter()
+                        .map(|item| match item {
+                            CovergroupItem::Coverpoint(cp) => self.cg_declared_sampling(&def, cp),
+                            _ => CgPointSampling::Integral,
+                        })
+                        .collect();
+                    self.cg_point_sampling
+                        .insert(cg_name.clone(), Arc::clone(&sampling));
+                    sampling
+                });
+            Some(sampling)
+        };
+        for (idx, item) in def.items.iter().enumerate() {
             if !stopped_items.is_empty() {
                 let item_name = match item {
                     CovergroupItem::Coverpoint(cp) => Some(Self::cg_point_name(cp)),
@@ -2301,10 +2388,17 @@ impl Simulator {
                     }
                     let val = self.eval_expr(&cp.expr);
                     let cp_name = Self::cg_point_name(cp);
-                    let owner = self.this_stack.last().copied().flatten();
-                    let real = (self.cg_expr_is_real(&def, cp, Some(&val), owner)
-                        && Self::cg_scalar_real_bins(cp))
-                    .then(|| val.to_f64());
+                    let is_real = match sampling.as_deref().map(|s| s[idx]) {
+                        None => val.is_real && Self::cg_scalar_real_bins(cp),
+                        Some(CgPointSampling::Integral) => false,
+                        Some(CgPointSampling::SampledType) => val.is_real,
+                        Some(CgPointSampling::FormalType(real)) => real,
+                        Some(CgPointSampling::Scoped) => {
+                            let owner = self.this_stack.last().copied().flatten();
+                            self.cg_expr_is_real(&def, cp, Some(&val), owner)
+                        }
+                    };
+                    let real = is_real.then(|| val.to_f64());
                     let vi = if real.is_none() && !val.has_xz() {
                         val.to_i64()
                     } else {

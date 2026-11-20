@@ -2994,24 +2994,29 @@ impl Simulator {
     /// the bytecode compiler's `expr_is_real_static`; a shape it cannot type
     /// answers false and keeps the integral rules.
     pub(super) fn expr_is_real_static(&self, e: &Expression) -> bool {
-        Self::expr_is_real_with(e, &|h| {
-            if h.path.len() == 1
-                && h.root.is_none()
-                && let Some(v) = self
-                    .local_stack
-                    .last()
-                    .and_then(|m| m.get(&h.path[0].name.name))
-            {
-                return v.is_real;
-            }
-            let n = self.resolve_hier_name(h);
-            self.lookup_signal_real(&n)
-        })
+        Self::expr_is_real_with(
+            e,
+            &|h| {
+                if h.path.len() == 1
+                    && h.root.is_none()
+                    && let Some(v) = self
+                        .local_stack
+                        .last()
+                        .and_then(|m| m.get(&h.path[0].name.name))
+                {
+                    return v.is_real;
+                }
+                let n = self.resolve_hier_name(h);
+                self.lookup_signal_real(&n)
+            },
+            &|name, args| self.real_system_call(name, args),
+        )
     }
 
     pub(super) fn expr_is_real_with(
         e: &Expression,
         ident_is_real: &impl Fn(&HierarchicalIdentifier) -> bool,
+        system_call_is_real: &impl Fn(&str, &[Expression]) -> bool,
     ) -> bool {
         // Every real-typed expression is 64 bits wide, so a node whose STATIC
         // width is already known to be anything else is integral — the
@@ -3019,7 +3024,7 @@ impl Simulator {
         if e.cached_width.get().is_some_and(|w| w != 64) {
             return false;
         }
-        let is_real = |e| Self::expr_is_real_with(e, ident_is_real);
+        let is_real = |e| Self::expr_is_real_with(e, ident_is_real, system_call_is_real);
         match &e.kind {
             ExprKind::Number(n) => matches!(
                 n,
@@ -3041,21 +3046,25 @@ impl Simulator {
                 else_expr,
                 ..
             } => is_real(then_expr) || is_real(else_expr),
-            ExprKind::SystemCall { name, args } => match name.as_str() {
-                "$__xz_type_cast" => matches!(
-                    args.first().map(|a| &a.kind),
-                    Some(ExprKind::TypeLiteral(dt))
-                        if self.dt_is_real(dt)
-                ),
-                // §6.24.1: `R'(i)` with `typedef real R` is a real operand.
-                "$__xz_named_cast" => args
-                    .first()
-                    .and_then(|a| self.named_cast_key(a))
-                    .and_then(|k| self.module.typedef_types.get(&k))
-                    .is_some_and(|dt| self.dt_is_real(dt)),
-                n => super::bytecode::system_function_is_real(n),
-            },
+            ExprKind::SystemCall { name, args } => system_call_is_real(name, args),
             _ => false,
+        }
+    }
+
+    pub(super) fn real_system_call(&self, name: &str, args: &[Expression]) -> bool {
+        match name {
+            "$__xz_type_cast" => matches!(
+                args.first().map(|a| &a.kind),
+                Some(ExprKind::TypeLiteral(dt))
+                    if self.dt_is_real(dt)
+            ),
+            // §6.24.1: `R'(i)` with `typedef real R` is a real operand.
+            "$__xz_named_cast" => args
+                .first()
+                .and_then(|a| self.named_cast_key(a))
+                .and_then(|k| self.module.typedef_types.get(&k))
+                .is_some_and(|dt| self.dt_is_real(dt)),
+            n => super::bytecode::system_function_is_real(n),
         }
     }
 

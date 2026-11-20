@@ -4652,6 +4652,7 @@ impl Simulator {
             has_any_array_nd_properties: std::cell::Cell::new(None),
             has_method_cache: std::cell::RefCell::new(HashMap::default()),
             covergroup_leaf_names: std::cell::OnceCell::new(),
+            cg_point_sampling: HashMap::default(),
             class_string_props: std::cell::RefCell::new(HashMap::default()),
             class_enclosing_cache: std::cell::RefCell::new(HashMap::default()),
             plain_class_types: std::cell::RefCell::new(None),

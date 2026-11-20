@@ -1,6 +1,7 @@
-//! IEEE 1800-2023 §19.5, §19.5.1, §19.5.3, §19.5.5–§19.5.7, §19.11.1.
+//! IEEE 1800-2023 §19.5, §19.5.1, §19.5.1.1, §19.5.3, §19.5.5–§19.5.7, §19.11.1.
 use xezim::simulate;
 
+/// §19.5.1: scalar bins match real singletons and inclusive range endpoints.
 #[test]
 fn real_scalar_bins_cover_numeric_values_and_endpoints() {
     let sim = simulate(include_str!("covergroup_real_bins.sv"), 100_000).unwrap();
@@ -30,18 +31,22 @@ fn real_exclusions_and_default_bins() {
     let coverage: Vec<_> = lines
         .iter()
         .copied()
-        .filter(|s| s.starts_with("cp ") || s.starts_with("default "))
+        .filter(|s| {
+            s.starts_with("cp ") || s.starts_with("default ") || s.starts_with("unweighted ")
+        })
         .collect();
     assert_eq!(
         coverage,
         [
             "default before 0 0/0",
+            "unweighted before 100 0/0",
             "cp 0 0/2, group 0",
             "cp 0 0/2, group 0",
             "cp 50 1/2, group 50",
             "cp 50 1/2, group 50",
             "cp 100 2/2, group 100",
             "default after 0 0/0",
+            "unweighted after 100 0/0",
         ]
     );
     assert_eq!(sim.error_count, 1, "{lines:?}");
