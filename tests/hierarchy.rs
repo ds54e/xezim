@@ -89,6 +89,8 @@ mod generate_block_type_scopes;
 mod generate_genvar_substitution;
 #[path = "hierarchy/generate_label_hier_roots.rs"]
 mod generate_label_hier_roots;
+#[path = "hierarchy/generate_nettype_drivers.rs"]
+mod generate_nettype_drivers;
 #[path = "hierarchy/generate_rename_by_binding.rs"]
 mod generate_rename_by_binding;
 #[path = "hierarchy/generate_scope_names.rs"]
