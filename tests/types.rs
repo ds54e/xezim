@@ -499,6 +499,14 @@ mod inside_const_members;
 mod issue_233_parenless_calls;
 #[path = "types/multi_dim_unpacked_arrays.rs"]
 mod multi_dim_unpacked_arrays;
+#[path = "types/nettype_array_drivers.rs"]
+mod nettype_array_drivers;
+#[path = "types/nettype_array_stage_scope.rs"]
+mod nettype_array_stage_scope;
+#[path = "types/nettype_delay_stages.rs"]
+mod nettype_delay_stages;
+#[path = "types/nettype_generate_delay_scope.rs"]
+mod nettype_generate_delay_scope;
 #[path = "types/nettype_nested_struct_drivers.rs"]
 mod nettype_nested_struct_drivers;
 #[path = "types/nettype_struct_variable_driver.rs"]
